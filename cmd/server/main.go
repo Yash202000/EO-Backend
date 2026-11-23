@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -20,7 +19,6 @@ import (
 	"github.com/automax/backend/internal/repository"
 	"github.com/automax/backend/internal/services"
 	"github.com/automax/backend/internal/storage"
-	"github.com/automax/backend/pkg/constants"
 	"github.com/automax/backend/pkg/utils"
 	"github.com/automax/backend/pkg/validation"
 	"github.com/go-playground/validator/v10"
@@ -37,7 +35,6 @@ func main() {
 	cfg := config.Load()
 	handlers.SetClientCode(cfg.ClientCode)
 
-	log.Printf("GOAL_MANAGEMENT enabled: %v", cfg.GoalManagement.Enabled)
 	validation.InitValidatorRegistry()
 	db, err := database.Connect(&cfg.Database)
 	if err != nil {
@@ -52,6 +49,10 @@ func main() {
 	// Seed default data
 	if err := database.Seed(db, cfg); err != nil {
 		log.Printf("Warning: Failed to seed database: %v", err)
+	}
+	// Ticket Type Builder POC: ticket types, their workflows and links (idempotent).
+	if err := services.NewTicketService(db).SeedTicketTypes(context.Background()); err != nil {
+		log.Printf("Warning: Failed to seed ticket types: %v", err)
 	}
 
 	redisClient, err := database.ConnectRedis(&cfg.Redis)
@@ -78,7 +79,6 @@ func main() {
 
 	// Initialize repositories
 	userRepo := repository.NewUserRepository(db)
-	categoryRepo := repository.NewCategoryRepository(db)
 	classificationRepo := repository.NewClassificationRepository(db)
 	locationRepo := repository.NewLocationRepository(db)
 	departmentRepo := repository.NewDepartmentRepository(db)
@@ -91,9 +91,7 @@ func main() {
 	reportRepo := repository.NewReportRepository(db)
 	reportTemplateRepo := repository.NewReportTemplateRepository(db)
 	rejectionLogRepo := repository.NewRejectionLogRepository(db)
-	nasaqVerificationRepo := repository.NewNasaqVerificationRepository(db)
 	lookupRepo := repository.NewLookupRepository(db)
-	callLogRepo := repository.NewCallLogRepository(db)
 	applicationLinkRepo := repository.NewApplicationLinkRepository(db)
 	configRepo := repository.NewConfigRepository(db)
 	settingsRepo := repository.NewSettingsRepository(db)
@@ -102,12 +100,7 @@ func main() {
 	errorLogService := services.NewErrorLogService(repository.NewErrorLogRepository(db))
 	services.DefaultErrorLog = errorLogService
 	escalationPolicyRepo := repository.NewEscalationPolicyRepository(db)
-	callerSentimentRepo := repository.NewCallerSentimentRepo(db)
-	goalRepo := repository.NewGoalRepository(db)
-	aiQualityFeedbackRepo := repository.NewAIQualityFeedbackRepository(db)
 	feedbackTemplateRepo := repository.NewFeedbackTemplateRepository(db)
-	publicFeedbackRepo := repository.NewIncidentPublicFeedbackRepository(db)
-	ivrSmsLinkRepo := repository.NewIvrSmsLinkRepository(db)
 	commentTemplateRepo := repository.NewCommentTemplateRepository(db)
 
 	// Initialize WebSocket hub and start it
@@ -122,8 +115,6 @@ func main() {
 	notificationService := services.NewNotificationService(notificationTemplateRepo, notificationLogRepo, userRepo, minioStorage, cfg)
 	userService := services.NewUserService(userRepo, departmentRepo, jwtManager, sessionStore, minioStorage, cfg, actionLogService, nil, redisClient, db)
 	userService.SetNotificationService(notificationService) // password-reset OTP SMS
-	extensionAssignmentRepo := repository.NewExtensionAssignmentRepository(db)
-	extensionService := services.NewExtensionService(db, extensionAssignmentRepo, userRepo, roleRepo, actionLogService, notificationService, wsHub, sessionStore, cfg)
 	otpService := services.NewOTPService(redisClient, notificationService, notificationLogRepo, userRepo, userService, sessionStore, jwtManager, roleRepo)
 	//otpService := services.NewOTPService(redisClient, notificationService, notificationLogRepo, userRepo, userService, roleRepo)
 
@@ -155,7 +146,6 @@ func main() {
 		log.Printf("Nafath login enabled (mode %s, %s)", cfg.Nafath.Mode, cfg.Nafath.BaseURL)
 	}
 
-	callLogService := services.NewCallLogService(callLogRepo, userRepo, minioStorage)
 	workflowService := services.NewWorkflowService(workflowRepo, roleRepo, departmentRepo, classificationRepo, userRepo, db, cfg)
 	incidentService := services.NewIncidentService(incidentRepo, incidentMergeRepo, workflowRepo, workflowService, userRepo, departmentRepo, classificationRepo, locationRepo, rejectionLogRepo, roleRepo, minioStorage, db, wsHub)
 	incidentMergeService := services.NewIncidentMergeService(incidentMergeRepo, incidentRepo, workflowRepo, roleRepo, locationRepo, classificationRepo, db, wsHub)
@@ -177,36 +167,8 @@ func main() {
 	escalationGroupService.SetFrontendURL(cfg.FrontendURL)
 	escalationGroupService.SetPolicyService(escalationPolicyService)
 	fcmService := services.NewFCMService(repository.NewDeviceTokenRepository(db), notificationLogRepo)
-	callerSentimentService := services.NewCallerSentimentService(callerSentimentRepo)
 	feedbackTemplateService := services.NewFeedbackTemplateService(feedbackTemplateRepo)
-	finalCloseWhatsAppFeedbackSessionService := services.NewFinalCloseWhatsAppFeedbackSessionService(cfg.FinalCloseWhatsAppFeedback.SessionBaseURL)
-	publicFeedbackService := services.NewIncidentPublicFeedbackService(publicFeedbackRepo, incidentRepo, notificationService, incidentService, workflowRepo, classificationRepo, finalCloseWhatsAppFeedbackSessionService)
 	commentTemplateService := services.NewCommentTemplateService(commentTemplateRepo)
-
-	// Goal management services
-	var documentaClient storage.DocumentaClient
-	if cfg.Documenta.Enabled {
-		documentaClient = storage.NewHTTPDocumentaClient(cfg.Documenta, redisClient)
-		log.Println("Documenta HTTP client enabled")
-	} else {
-		documentaClient = storage.NewStubDocumentaClient()
-		log.Println("Documenta stub client (DOCUMENTA_ENABLED=false)")
-	}
-	goalService := services.NewGoalService(goalRepo, workflowRepo, userRepo, departmentRepo, documentaClient, notificationService, actionLogService, cfg, wsHub)
-	documentService := services.NewDocumentService(documentaClient, cfg.Documenta)
-	documentAuthzService := services.NewDocumentAuthzService(db, documentaClient, cfg.Documenta)
-
-	// KPI evidence uploads use a SEPARATE Documenta client/config from Goal
-	// Management's (own OAuth credentials, own workspace) — an explicit
-	// product decision, not shared with documentaClient above.
-	var kpiDocumentaClient storage.DocumentaClient
-	if cfg.KpiDocumenta.Enabled {
-		kpiDocumentaClient = storage.NewHTTPDocumentaClient(cfg.KpiDocumenta, redisClient)
-		log.Println("KPI Documenta HTTP client enabled")
-	} else {
-		kpiDocumentaClient = storage.NewStubDocumentaClient()
-		log.Println("KPI Documenta stub client (KPI_DOCUMENTA_ENABLED=false)")
-	}
 
 	// Ready-to-Close service
 	readyToCloseRepo := repository.NewReadyToCloseRepository(db)
@@ -217,12 +179,8 @@ func main() {
 	incidentService.SetNotificationService(notificationService)
 	incidentService.SetUserService(userService)
 	incidentService.SetFCMService(fcmService)
-	incidentService.SetIvrSmsLinkRepo(ivrSmsLinkRepo)
 	incidentService.SetConfig(cfg)
-	smsFeedbackPendingRepo := repository.NewSmsFeedbackPendingRepository(db)
-	incidentService.SetActionExecutor(services.NewActionExecutor(incidentRepo, userRepo, notificationService, smsFeedbackPendingRepo))
-	incidentService.SetPublicFeedbackRepo(publicFeedbackRepo)
-	incidentService.SetSmsFeedbackPendingRepo(smsFeedbackPendingRepo, cfg.SmsFeedback.DelayMinutes)
+	incidentService.SetActionExecutor(services.NewActionExecutor(incidentRepo, userRepo, notificationService))
 
 	// External Integration
 	integrationRepo := repository.NewIntegrationRepository(db)
@@ -241,8 +199,7 @@ func main() {
 		}
 	}
 	log.Printf("SLA Monitor interval: %d minutes", slaIntervalMinutes)
-	smsFeedbackService := services.NewSmsFeedbackService(smsFeedbackPendingRepo, incidentRepo, notificationService, finalCloseWhatsAppFeedbackSessionService)
-	slaMonitor := services.NewSLAMonitor(incidentRepo, escalationService, escalationGroupService, readyToCloseService, smsFeedbackService, time.Duration(slaIntervalMinutes)*time.Minute)
+	slaMonitor := services.NewSLAMonitor(incidentRepo, escalationService, escalationGroupService, readyToCloseService, time.Duration(slaIntervalMinutes)*time.Minute)
 	ctx := context.Background()
 	slaMonitor.Start(ctx)
 	defer slaMonitor.Stop()
@@ -268,18 +225,6 @@ func main() {
 	errorLogRetentionMonitor.Start(ctx)
 	defer errorLogRetentionMonitor.Stop()
 
-	// Initialize and start AI Quality Monitor
-	aiQualityMonitor := services.NewAIQualityMonitor(aiQualityFeedbackRepo, incidentRepo, minioStorage, cfg.AIQuality)
-	aiQualityMonitor.Start(ctx)
-	defer aiQualityMonitor.Stop()
-
-	clientCode := strings.TrimSpace(cfg.ClientCode)
-	if strings.EqualFold(clientCode, constants.CLIENT_CODE.EPM940) {
-		// Initialize and start Auto-Assign Monitor
-		autoAssignMonitor := services.NewAutoAssignMonitor(incidentService, cfg.AutoAssign)
-		autoAssignMonitor.Start(ctx)
-		defer autoAssignMonitor.Stop()
-	}
 	// Initialize validator
 	validate := validator.New()
 
@@ -290,21 +235,15 @@ func main() {
 	// Initialize LDAP handler
 	ldapHandler := handlers.NewLDAPHandler(ldapService, userService, userRepo, jwtManager, sessionStore, cfg, adBaseerClient, redisClient)
 
-	categoryService := services.NewCategoryService(categoryRepo)
-	categoryHandler := handlers.NewCategoryHandler(categoryService)
 	classificationHandler := handlers.NewClassificationHandler(classificationRepo, cfg)
 	locationHandler := handlers.NewLocationHandler(locationRepo, cfg)
 	departmentHandler := handlers.NewDepartmentHandler(departmentRepo, userRepo, incidentRepo, cfg)
-	extensionHandler := handlers.NewExtensionHandler(extensionService, cfg)
 	roleHandler := handlers.NewRoleHandler(roleRepo, permissionRepo, userRepo, wsHub, cfg)
 	actionLogHandler := handlers.NewActionLogHandler(actionLogService, validate)
-	callLogHandler := handlers.NewCallLogHandler(callLogService, validate, userService, minioStorage)
 	workflowHandler := handlers.NewWorkflowHandler(workflowService, actionLogService, cfg)
 	incidentHandler := handlers.NewIncidentHandler(incidentService, userService, userRepo, incidentRepo, workflowRepo, locationRepo, classificationRepo, minioStorage, presenceService, cfg)
 	incidentHandler.SetReadyToCloseService(readyToCloseService)
-	incidentHandler.SetIvrSmsLinkRepo(ivrSmsLinkRepo)
 	incidentHandler.SetNotificationService(notificationService)
-	incidentHandler.SetPublicFeedbackRepo(publicFeedbackRepo)
 	incidentHandler.SetLookupRepo(lookupRepo)
 	incidentMergeHandler := handlers.NewIncidentMergeHandler(incidentMergeService, userRepo)
 	websocketHandler := handlers.NewWebSocketHandler(wsHub)
@@ -338,91 +277,16 @@ func main() {
 	feedbackTemplateHandler := handlers.NewFeedbackTemplateHandler(feedbackTemplateService)
 	commentTemplateHandler := handlers.NewCommentTemplateHandler(commentTemplateService)
 	rejectionLogHandler := handlers.NewRejectionLogHandler(rejectionLogRepo)
-	nasaqClient := services.NewNasaqClient(cfg.Nasaq)
-	nasaqVerificationHandler := handlers.NewNasaqVerificationHandler(incidentRepo, nasaqVerificationRepo, nasaqClient)
-	incidentFeedbackHandler := handlers.NewIncidentFeedbackHandler(incidentRepo, publicFeedbackRepo)
-	publicFeedbackHandler := handlers.NewIncidentPublicFeedbackHandler(publicFeedbackService, actionLogService)
-	aiQualityFeedbackHandler := handlers.NewAIQualityFeedbackHandler(aiQualityFeedbackRepo)
 	fcmHandler := handlers.NewFCMHandler(fcmService)
-	ctiHandler := handlers.NewCTIHandler(cfg.Cintrix.URL, cfg.Cintrix.APIKeyID, cfg.Cintrix.APIKeySecret, callLogRepo, userRepo, extensionAssignmentRepo, db)
 	integrationUserHandler := handlers.NewIntegrationUserHandler(userService, roleRepo, departmentRepo, locationRepo, classificationRepo)
-	sentimentHandler := handlers.NewCallerSentimentHandler(callerSentimentService)
-	goalHandler := handlers.NewGoalHandler(goalService, actionLogService)
-	goalAnalyticsService := services.NewGoalAnalyticsService(db)
-	goalAnalyticsHandler := handlers.NewGoalAnalyticsHandler(goalAnalyticsService)
-	reviewRepo := repository.NewReviewRepository(db)
-	reviewService := services.NewReviewService(reviewRepo, goalRepo)
-	reviewHandler := handlers.NewReviewHandler(reviewService)
-	documentHandler := handlers.NewDocumentHandler(documentService, documentAuthzService, cfg.Documenta.WorkspaceName)
-
-	// Goal Templates
-	goalTemplateRepo := repository.NewGoalTemplateRepository(db)
-	goalTemplateService := services.NewGoalTemplateService(goalTemplateRepo)
-	goalTemplateHandler := handlers.NewGoalTemplateHandler(goalTemplateService)
-
-	// KPI Master Data handler
-	kpiMasterDataHandler := handlers.NewKpiMasterDataHandler(db)
-
-	// KPI Workflow service
-	kpiWorkflowService := services.NewKpiWorkflowService(db, workflowRepo, cfg.KpiDictionaryWorkflowCode)
-
-	// KPI Dictionary handler
-	kpiDictionaryHandler := handlers.NewKpiDictionaryHandler(db, actionLogService, kpiWorkflowService)
-	kpiImportHandler := handlers.NewKpiImportHandler(db, actionLogService, kpiWorkflowService)
-
-	// KPI Performance handler
-	kpiPerformanceHandler := handlers.NewKpiPerformanceHandler(db, kpiWorkflowService, actionLogService)
-
-	// KPI Engagement handler (metrics, evidence, collaborators, check-ins, comments, activity)
-	kpiEngagementHandler := handlers.NewKpiEngagementHandler(db, actionLogService, minioStorage, kpiDocumentaClient, cfg.KpiDocumenta)
-
-	// KPI Evidence Folder Configuration handler (resolve/browse/create Documenta folders by taxonomy)
-	kpiDocumentaHandler := handlers.NewKpiDocumentaHandler(kpiDocumentaClient, cfg.KpiDocumenta)
-
-	// KPI Dashboard handler
-	kpiDashboardHandler := handlers.NewKpiDashboardHandler(db)
-
-	// KPI Performance Band handler
-	kpiPerformanceBandHandler := handlers.NewKpiPerformanceBandHandler(db)
-
-	// KPI Corrective Action handler
-	kpiCorrectiveActionHandler := handlers.NewKpiCorrectiveActionHandler(db)
-
-	// KPI Entry handler
-	kpiEntryHandler := handlers.NewKpiEntryHandler(db, actionLogService, kpiWorkflowService)
-
-	// KPI Collaborator Assignment handler
-	kpiCollaboratorHandler := handlers.NewKpiCollaboratorHandler(db, actionLogService)
-
-	// Per-KPI access from collaborator assignments (Super Admin sees all)
-	kpiAccess := handlers.NewKpiAccessHandler(services.NewKpiAccessService(db))
-
-	// KPI Composed views handler (Card / per-KPI Dashboard / annual rollup)
-	kpiComposedHandler := handlers.NewKpiComposedHandler(db)
 
 	// Integration handler
 	integrationHandler := handlers.NewIntegrationHandler(integrationService, integrationExecutor, integrationRepo, incidentRepo)
 	webhookHandler := handlers.NewWebhookHandler(integrationService, incidentService)
-	cintrixWebhookHandler := handlers.NewCintrixWebhookHandler(cfg.Cintrix.WebhookSecret, callLogRepo, userRepo)
 
-	// MOMRA CRM outbound integration (Automax -> MOMRA: classification/EE master sync,
-	// status sync). Reverse direction from the existing inbound EPM routes below.
-	// Leaving MOMRA_BASE_URL unset still wires the routes but every call will fail
-	// against an empty base URL — acceptable for now since this is behind admin-only,
-	// manually-triggered endpoints, not something that runs unprompted.
-	momraClient := services.NewMOMRAClient(cfg.MOMRA)
-	momraSyncService := services.NewMOMRASyncService(momraClient, classificationRepo, departmentRepo, cfg.MOMRA)
-	momraSyncHandler := handlers.NewMOMRASyncHandler(momraSyncService)
-
-	// MOMRA status sync (Story A/B/C: WorkflowState -> CaseStatusID mapping, outbound
-	// call on status change reusing the integration execution-log infra, retry/backoff).
-	momraStatusMappingRepo := repository.NewMOMRAStatusMappingRepository(db)
-	momraStatusSyncService, err := services.NewMOMRAStatusSyncService(ctx, momraClient, momraStatusMappingRepo, integrationRepo, incidentRepo, cfg.MOMRA.AmanaID)
 	if err != nil {
 		log.Fatalf("failed to initialize MOMRA status sync service: %v", err)
 	}
-	incidentService.SetMOMRAStatusSyncService(momraStatusSyncService)
-	momraStatusMappingHandler := handlers.NewMOMRAStatusMappingHandler(momraStatusMappingRepo, momraStatusSyncService, integrationRepo)
 
 	// License management
 	licenseRepo := repository.NewLicenseRepository(db)
@@ -442,14 +306,6 @@ func main() {
 
 	// Wire settings repo into user service to gate login token issuance on totp_enabled
 	userService.SetSettingsRepo(settingsRepo)
-
-	// Initialize GIS handler
-	gisService := services.NewGISService()
-	gisHandler := handlers.NewGISHandler(gisService)
-
-	// Initialize EPM handler
-	epmHandler := handlers.NewEPMHandler(userRepo, jwtManager, sessionStore)
-	epmIncidentHandler := handlers.NewEPMIncidentHandler(userRepo, locationRepo, classificationRepo, incidentRepo, workflowRepo, lookupRepo, departmentRepo, momraStatusMappingRepo, jwtManager, sessionStore, minioStorage, db, wsHub)
 
 	// Initialize middleware
 	authMiddleware := middleware.NewAuthMiddleware(jwtManager, sessionStore, userRepo)
@@ -485,25 +341,6 @@ func main() {
 	app.Get("/.well-known/jwks.json", jwksHandler.GetJWKS)
 	app.Get("/sso/callback", ssoHandler.Callback)
 
-	// EPM external API routes
-	app.Post("/Momra/API/EPM/Login", epmHandler.Login)
-	app.Post("/Momra/API/EPM/InsertIncidents", epmIncidentHandler.InsertIncidents)
-	app.Get("/Momra/API/EPM/GetMomraIncidentStatusDetails", epmIncidentHandler.GetMomraIncidentStatusDetails)
-	app.Post("/Momra/API/EPM/UpdateIncident", epmIncidentHandler.UpdateIncident)
-	app.Post("/Momra/API/EPM/ReopenIncident", epmIncidentHandler.ReopenIncident)
-
-	// EPM v2 routes - newer MOMRA contract (PATCH, meta/json request envelope, response
-	// envelope). Left alongside the v1 routes above.
-	app.Patch("/Momra/API/EPM/UpdateIncidentV2", epmIncidentHandler.UpdateIncidentV2)
-	app.Patch("/Momra/API/EPM/ReOpenIncidentV2", epmIncidentHandler.ReopenIncidentV2)
-	// STUB: MOMRA->Automax external-entity assignment notification. Mechanism/contract
-	// not yet confirmed by MOMRA (OD-N2) — see AssignExternalEntity's doc comment. Kept
-	// alongside UpdateIncidentV2, which now also persists EE fields on every call.
-	app.Patch("/Momra/API/EPM/AssignExternalEntity", epmIncidentHandler.AssignExternalEntity)
-	// AttachmentURLs sent in outbound UpdateStatusV2 calls point here — MinIO isn't
-	// reachable from MOMRA, so the file is streamed through the backend.
-	app.Get("/Momra/API/EPM/Attachments/:attachment_id", epmIncidentHandler.DownloadAttachment)
-
 	api := app.Group("/api")
 	v1 := api.Group("/v1")
 
@@ -519,11 +356,6 @@ func main() {
 	// Query params: token (for auth)
 	v1.Get("/ws/broadcast", websocketHandler.BroadcastWebSocketUpgrader())
 
-	if cfg.GoalManagement.Enabled {
-		v1.Get("/ws/goal", websocketHandler.GoalWebSocketUpgrader())
-		v1.Get("/ws/goal/broadcast", websocketHandler.GoalBroadcastWebSocketUpgrader())
-	}
-
 	// WebSocket connection statistics endpoint
 	v1.Get("/ws/stats", authMiddleware.RequirePermission("incidents:view"), websocketHandler.GetConnectionStats)
 
@@ -531,18 +363,6 @@ func main() {
 	webhooks := v1.Group("/webhooks")
 	webhooks.Post("/sendgrid/inbound", notificationHandler.SendGridInboundWebhook)
 	webhooks.Post("/automax-callback", webhookHandler.HandleAutomaxCallback)
-	webhooks.Post("/cintrix/call-event", cintrixWebhookHandler.HandleCallEvent)
-
-	ivr := v1.Group("/ivr/incident")
-	// Public: validates signed URL + last 6 digits, returns incident + session token
-	ivr.Get("/sms-link/:id", incidentHandler.FindByIDWithLast6DigitValidation)
-	// Public: validates signed URL from normal closure SMS, returns incident info for feedback page
-	ivr.Get("/feedback/:id", incidentHandler.FindByIDForFeedback)
-	// Public: validates signed report URL + last 6 digits, returns the citizen-facing incident report PDF
-	ivr.Post("/report/:id/verify", incidentHandler.GenerateCitizenReport)
-	// Protected: require valid IVR session token issued by the GET route above
-	// ivr.Put("/sms-link/update/:id", authMiddleware.ValidateIvrSmsToken(), incidentHandler.UpdateIncidentViaIvrSms)
-	// ivr.Post("/sms-link/attachment/:id", authMiddleware.ValidateIvrSmsToken(), incidentHandler.UploadAttachmentIvrSms)
 
 	// Auth routes
 	auth := v1.Group("/auth")
@@ -584,8 +404,36 @@ func main() {
 	users.Post("/me/avatar", authMiddleware.Authenticate(), userHandler.UploadAvatar)
 	users.Put("/me/password", authMiddleware.Authenticate(), userHandler.ChangePassword)
 	users.Delete("/me", authMiddleware.Authenticate(), userHandler.DeleteAccount)
-	users.Put("/:userExtID/status", userHandler.UpdateUserCallStatus)
 	users.Put("/:userID/password", authMiddleware.Authenticate(), authMiddleware.RequirePermission("users:reset_password"), userHandler.AdminResetPassword)
+
+	// Ticket routes (authenticated users)
+	ticketHandler := handlers.NewTicketHandler(services.NewTicketService(db), minioStorage)
+	ticketTypes := v1.Group("/ticket-types", authMiddleware.Authenticate())
+	ticketTypes.Post("/", authMiddleware.RequirePermission("workflows:create"), ticketHandler.CreateType)
+	ticketTypes.Get("/", authMiddleware.RequirePermission("workflows:view"), ticketHandler.ListTypes)
+	ticketTypes.Get("/:code", authMiddleware.RequirePermission("workflows:view"), ticketHandler.GetType)
+	ticketTypes.Put("/:code", authMiddleware.RequirePermission("workflows:update"), ticketHandler.UpdateType)
+	ticketTypes.Put("/:code/links", authMiddleware.RequirePermission("workflows:update"), ticketHandler.SaveLink)
+
+	ticketTypes.Put("/:code/fields", authMiddleware.RequirePermission("workflows:update"), ticketHandler.SetFields)
+	ticketTypes.Get("/:code/go-live-checks", authMiddleware.RequirePermission("workflows:view"), ticketHandler.GoLiveChecks)
+	ticketTypes.Post("/:code/publish", authMiddleware.RequirePermission("workflows:update"), ticketHandler.PublishType)
+	ticketTypes.Delete("/:code", authMiddleware.RequirePermission("workflows:delete"), ticketHandler.DeleteType)
+
+	tickets := v1.Group("/tickets", authMiddleware.Authenticate())
+	tickets.Post("/", authMiddleware.RequirePermission("incidents:create"), ticketHandler.CreateTicket)
+	tickets.Get("/", authMiddleware.RequirePermission("incidents:view"), ticketHandler.ListTickets)
+	tickets.Post("/search", authMiddleware.RequirePermission("incidents:view"), ticketHandler.SearchTickets)
+	tickets.Get("/:id", authMiddleware.RequirePermission("incidents:view"), ticketHandler.GetTicket)
+	tickets.Get("/:id/history", authMiddleware.RequirePermission("incidents:view"), ticketHandler.History)
+	tickets.Post("/:id/transition", authMiddleware.RequirePermission("incidents:transition"), ticketHandler.Transition)
+	tickets.Get("/:id/activity", authMiddleware.RequirePermission("incidents:view"), ticketHandler.Activity)
+	tickets.Post("/:id/comments", authMiddleware.RequirePermission("incidents:comment"), ticketHandler.AddComment)
+	tickets.Get("/:id/comments", authMiddleware.RequirePermission("incidents:view"), ticketHandler.ListComments)
+	tickets.Post("/:id/attachments", authMiddleware.RequirePermission("incidents:update"), ticketHandler.UploadAttachment)
+	tickets.Get("/:id/attachments", authMiddleware.RequirePermission("incidents:view"), ticketHandler.ListAttachments)
+	tickets.Get("/:id/attachments/:attachment_id/download", authMiddleware.RequirePermission("incidents:view"), ticketHandler.DownloadAttachment)
+	tickets.Delete("/:id/attachments/:attachment_id", authMiddleware.RequirePermission("incidents:update"), ticketHandler.DeleteAttachment)
 
 	// Incident routes (authenticated users)
 	incidents := v1.Group("/incidents", authMiddleware.Authenticate(), licenseMiddleware.RequireLicensedFeature(string(licensing.FeatureIncidents)))
@@ -623,25 +471,6 @@ func main() {
 	incidents.Put("/:id/assign", authMiddleware.RequirePermission("incidents:assign"), incidentHandler.AssignIncident)
 	incidents.Get("/:id/revisions", authMiddleware.RequirePermission("incidents:view"), incidentHandler.ListRevisions)
 	incidents.Get("/:id/rejection-logs", authMiddleware.RequirePermission("incidents:view"), rejectionLogHandler.GetByIncident)
-	incidents.Get("/:id/ai-quality", authMiddleware.RequirePermission("incidents:view"), aiQualityFeedbackHandler.GetByIncident)
-	incidents.Post("/:id/request-info", authMiddleware.RequirePermission("incidents:request-info"), incidentHandler.RequestCitizenInfo)
-	incidents.Post("/:id/nasaq/verify", authMiddleware.RequirePermission("incidents:verify-nasaq"), nasaqVerificationHandler.Verify)
-	incidents.Get("/:id/nasaq/verify", authMiddleware.RequirePermission("incidents:view"), nasaqVerificationHandler.GetLatest)
-
-	aiQuality := v1.Group("/ai-quality", authMiddleware.Authenticate(), licenseMiddleware.RequireLicensedFeature(string(licensing.FeatureAIQuality)))
-	aiQuality.Get("/", authMiddleware.RequirePermission("incidents:view"), aiQualityFeedbackHandler.GetAll)
-
-	feedback := v1.Group("/feedback", authMiddleware.Authenticate())
-	feedback.Get("/", authMiddleware.RequirePermission("incidents:view"), incidentFeedbackHandler.ListAllFeedback)
-	feedback.Post("/:id", authMiddleware.RequirePermission("incidents:update"), incidentFeedbackHandler.CreateFeedback)
-	feedback.Get("/:id", authMiddleware.RequirePermission("incidents:view"), incidentFeedbackHandler.ListFeedback)
-
-	publicFeedback := v1.Group("/public-feedback")
-	publicFeedback.Post("/:incidentID", authMiddleware.Authenticate(), authMiddleware.RequirePermission("incidents:update"), publicFeedbackHandler.Create)
-	publicFeedback.Get("/", authMiddleware.Authenticate(), authMiddleware.RequirePermission("incidents:view"), publicFeedbackHandler.ListAll)
-	publicFeedback.Get("/:incidentID", authMiddleware.Authenticate(), authMiddleware.RequirePermission("incidents:view"), publicFeedbackHandler.ListByIncident)
-	publicFeedback.Get("/:incidentID/init", publicFeedbackHandler.Init)
-	publicFeedback.Put("/:incidentID/submit", publicFeedbackHandler.Submit)
 
 	// Closed incident editing (requires special permission)
 	incidents.Patch("/:id/closed-summary", authMiddleware.RequirePermission("incidents:edit-closed"), incidentHandler.UpdateClosedIncidentSummary)
@@ -734,19 +563,6 @@ func main() {
 	// Integration user provisioning (external teams create users with minimal payload)
 	integrationUsers := v1.Group("/integration/users", authMiddleware.Authenticate(), authMiddleware.RequirePermission("users:create"))
 	integrationUsers.Post("/", integrationUserHandler.CreateUser)
-
-	// Category routes (foundational admin taxonomy used by goals — no license gate)
-	categories := admin.Group("/categories", middleware.ActionLogger(middleware.ActionLoggerConfig{
-		Enabled:     true,
-		LogService:  actionLogService,
-		SkipMethods: []string{"GET"},
-	}))
-	categories.Post("/", authMiddleware.RequirePermission("categories:create"), categoryHandler.Create)
-	categories.Get("/", authMiddleware.RequirePermission("categories:view"), categoryHandler.List)
-	categories.Get("/tree", authMiddleware.RequirePermission("categories:view"), categoryHandler.GetTree)
-	categories.Get("/:id", authMiddleware.RequirePermission("categories:view"), categoryHandler.GetByID)
-	categories.Put("/:id", authMiddleware.RequirePermission("categories:update"), categoryHandler.Update)
-	categories.Delete("/:id", authMiddleware.RequirePermission("categories:delete"), categoryHandler.Delete)
 
 	// Classification routes (with action logging)
 	classifications := admin.Group("/classifications", middleware.ActionLogger(middleware.ActionLoggerConfig{
@@ -843,15 +659,6 @@ func main() {
 	actionLogs.Get("/:id", authMiddleware.RequirePermission("action-logs:view"), actionLogHandler.GetActionLog)
 	actionLogs.Get("/export", authMiddleware.RequirePermission("action-logs:export"), actionLogHandler.ExportActionLogs)
 	actionLogs.Delete("/cleanup", authMiddleware.RequirePermission("action-logs:delete"), actionLogHandler.CleanupOldLogs)
-
-	// Call Log routes
-	callLogs := admin.Group("/call-logs", licenseMiddleware.RequireLicensedFeature(string(licensing.FeatureCallCentre)))
-	callLogs.Post("/", authMiddleware.RequirePermission("call-logs:create"), callLogHandler.CreateCallLog)
-	callLogs.Get("/", authMiddleware.RequirePermission("call-logs:view"), callLogHandler.ListCallLogs)
-	callLogs.Get("/stats", authMiddleware.RequirePermission("call-logs:view"), callLogHandler.GetStats)
-	callLogs.Get("/:id", authMiddleware.RequirePermission("call-logs:view"), callLogHandler.GetCallLog)
-	callLogs.Put("/:id", authMiddleware.RequirePermission("call-logs:update"), callLogHandler.UpdateCallLog)
-	callLogs.Delete("/:id", authMiddleware.RequirePermission("call-logs:delete"), callLogHandler.DeleteCallLog)
 
 	// Workflow routes (with action logging)
 	workflows := admin.Group("/workflows", licenseMiddleware.RequireLicensedFeature(string(licensing.FeatureWorkflows)), middleware.ActionLogger(middleware.ActionLoggerConfig{
@@ -955,22 +762,6 @@ func main() {
 	integrationScripts.Delete("/:id", authMiddleware.RequirePermission("admin:integration"), integrationHandler.DeleteScript)
 	integrationScripts.Post("/:id/test", authMiddleware.RequirePermission("admin:integration"), integrationHandler.TestScript)
 	integrationScripts.Get("/:id/logs", authMiddleware.RequirePermission("admin:integration"), integrationHandler.ListLogsByScript)
-
-	// MOMRA CRM outbound sync — manual admin trigger for classification / external
-	// entity / EE-classification master data (docs/MOMRA_Outbound_Integration_Spec_v1.0.md).
-	momraSync := admin.Group("/momra")
-	momraSync.Post("/sync/classifications", authMiddleware.RequirePermission("admin:integration"), momraSyncHandler.SyncClassifications)
-	momraSync.Post("/sync/external-entities", authMiddleware.RequirePermission("admin:integration"), momraSyncHandler.SyncExternalEntities)
-	momraSync.Post("/sync/external-entity-classifications", authMiddleware.RequirePermission("admin:integration"), momraSyncHandler.SyncExternalEntityClassifications)
-	momraSync.Post("/sync/all", authMiddleware.RequirePermission("admin:integration"), momraSyncHandler.SyncAll)
-
-	momraStatusMappings := admin.Group("/momra/status-mappings")
-	momraStatusMappings.Post("/", authMiddleware.RequirePermission("admin:integration"), momraStatusMappingHandler.Create)
-	momraStatusMappings.Get("/", authMiddleware.RequirePermission("admin:integration"), momraStatusMappingHandler.ListByWorkflow)
-	momraStatusMappings.Put("/:id", authMiddleware.RequirePermission("admin:integration"), momraStatusMappingHandler.Update)
-	momraStatusMappings.Delete("/:id", authMiddleware.RequirePermission("admin:integration"), momraStatusMappingHandler.Delete)
-	momraSync.Get("/status-sync/logs", authMiddleware.RequirePermission("admin:integration"), momraStatusMappingHandler.ListStatusSyncLogs)
-	momraSync.Post("/status-sync/logs/:logId/retry", authMiddleware.RequirePermission("admin:integration"), momraStatusMappingHandler.RetryFailedSync)
 
 	stateIntegrations := admin.Group("/workflow-states")
 	stateIntegrations.Post("/:stateId/triggers", authMiddleware.RequirePermission("admin:integration"), integrationHandler.CreateStateTrigger)
@@ -1094,24 +885,6 @@ func main() {
 	// Public feature catalog — no auth; describes product shape, not tenant state.
 	v1.Get("/license/catalog", licenseHandler.GetCatalog)
 
-	// Call routes (authenticated users)
-	calls := v1.Group("/calls", authMiddleware.Authenticate())
-	calls.Post("/start", callLogHandler.StartCall)
-	calls.Post("/:call_uuid/end", callLogHandler.EndCall)
-	calls.Post("/:call_uuid/join", callLogHandler.JoinCall)
-	calls.Post("/:call_uuid/attachments", callLogHandler.UploadAttachment)
-	calls.Get("/:attachment_id/preview", callLogHandler.PreviewAttachment)
-
-	// Call logs routes
-	callLogsPublic := v1.Group("/call-logs", authMiddleware.Authenticate())
-	callLogsPublic.Get("/sip-info", callLogHandler.GetSipInfo)
-	callLogsPublic.Get("/extension/:extension", callLogHandler.GetCallLogsByExtension)
-
-	// Cintrix CTI routes (contact-center softphone widget)
-	cti := v1.Group("/cti", authMiddleware.Authenticate())
-	cti.Get("/widget-token", ctiHandler.GetWidgetToken)
-	cti.Get("/recording", ctiHandler.GetRecording)
-
 	// ---- TEMPLATE ROUTES (legacy path, no feature-license gate) ----
 	templates := v1.Group("/templates", authMiddleware.Authenticate())
 	templates.Post("/", authMiddleware.RequirePermission("templates:create"), templateHandler.Create)
@@ -1119,18 +892,6 @@ func main() {
 	templates.Get("/:id", authMiddleware.RequirePermission("templates:read"), templateHandler.GetByID)
 	templates.Put("/:id", authMiddleware.RequirePermission("templates:update"), templateHandler.Update)
 	templates.Delete("/:id", authMiddleware.RequirePermission("templates:delete"), templateHandler.Delete)
-
-	// ---- EXTENSION ASSIGNMENT ROUTES (EPM940 telephony feature) ----
-	// Only registered for the EPM940 deployment; other clients get 404.
-	if strings.EqualFold(clientCode, constants.CLIENT_CODE.EPM940) {
-		extensions := v1.Group("/extensions", authMiddleware.Authenticate())
-		extensions.Get("/", authMiddleware.RequirePermission("extensions:view"), extensionHandler.List)
-		extensions.Get("/mine", authMiddleware.RequirePermission("extensions:view"), extensionHandler.Mine)
-		extensions.Get("/:extension/history", authMiddleware.RequirePermission("extensions:view"), extensionHandler.History)
-		extensions.Post("/assign", authMiddleware.RequirePermission("extensions:assign"), extensionHandler.Assign)
-		extensions.Post("/create", authMiddleware.RequirePermission("extensions:create"), extensionHandler.Create)
-		extensions.Delete("/:extension", authMiddleware.RequirePermission("extensions:release"), extensionHandler.Release)
-	}
 
 	// ---- NOTIFICATION ROUTES ----
 	notifications := v1.Group("/notifications", authMiddleware.Authenticate(), licenseMiddleware.RequireLicensedFeature(string(licensing.FeatureCommunication)))
@@ -1231,393 +992,6 @@ func main() {
 	fcm.Post("/push", fcmHandler.PushNotification)
 	fcm.Get("/device-tokens", fcmHandler.GetUserDeviceTokens)
 	fcm.Delete("/remove-device", fcmHandler.RemoveDevice)
-
-	//Caller sentiments
-	callerSentiments := v1.Group("/caller-sentiments", authMiddleware.Authenticate(), licenseMiddleware.RequireLicensedFeature(string(licensing.FeatureCallCentre)))
-	callerSentiments.Post("/", authMiddleware.RequirePermission("caller-sentiment:create"), sentimentHandler.Create)
-	callerSentiments.Get("/", authMiddleware.RequirePermission("caller-sentiment:view"), sentimentHandler.GetAllCallerSentiments)
-	callerSentiments.Get("/:caller_id", authMiddleware.RequirePermission("caller-sentiment:view"), sentimentHandler.GetCallerSentiments)
-	callerSentiments.Get("/:caller_id/:callee_id", sentimentHandler.GetCallerSentimentsByCallerAndCallee)
-
-	if cfg.GoalManagement.Enabled {
-		// ---- GOAL TEMPLATE ROUTES ----
-		goalTemplates := v1.Group("/goal-templates", authMiddleware.Authenticate(), licenseMiddleware.RequireLicensedFeature(string(licensing.FeatureGoals)))
-		goalTemplates.Post("/", authMiddleware.RequirePermission("goals:create"), goalTemplateHandler.Create)
-		goalTemplates.Get("/", authMiddleware.RequirePermission("goals:view"), goalTemplateHandler.List)
-		goalTemplates.Get("/active", authMiddleware.RequirePermission("goals:view"), goalTemplateHandler.ListActive)
-		goalTemplates.Get("/:id", authMiddleware.RequirePermission("goals:view"), goalTemplateHandler.GetByID)
-		goalTemplates.Put("/:id", authMiddleware.RequirePermission("goals:update"), goalTemplateHandler.Update)
-		goalTemplates.Delete("/:id", authMiddleware.RequirePermission("goals:delete"), goalTemplateHandler.Delete)
-
-		// ---- GOAL MANAGEMENT ROUTES ----
-		goals := v1.Group("/goals", authMiddleware.Authenticate(), licenseMiddleware.RequireLicensedFeature(string(licensing.FeatureGoals)))
-		goals.Get("/export", authMiddleware.RequirePermission("goals:view"), goalHandler.ExportGoals)
-		goals.Post("/import", authMiddleware.RequirePermission("goals:create"), goalHandler.ImportGoals)
-		goals.Get("/metrics/export-template", authMiddleware.RequirePermission("goals:view"), goalHandler.ExportMetricsTemplate)
-		goals.Post("/metrics/import", authMiddleware.RequirePermission("goals:update"), goalHandler.ImportMetrics)
-		goals.Get("/metric-batches", authMiddleware.RequirePermission("goals:view"), goalHandler.ListMetricImportBatches)
-		goals.Get("/metric-batches/:id", authMiddleware.RequirePermission("goals:view"), goalHandler.GetMetricImportBatch)
-		goals.Delete("/metric-batches/:id", authMiddleware.RequirePermission("goals:update"), goalHandler.DeleteMetricImportBatch)
-		goals.Get("/metric-batches/:id/available-transitions", authMiddleware.RequirePermission("goals:view"), goalHandler.GetAvailableMetricBatchTransitions)
-		goals.Post("/metric-batches/:id/transition", authMiddleware.RequirePermission("goals:update"), goalHandler.ExecuteMetricBatchTransition)
-		goals.Get("/metric-batches/:id/transition-history", authMiddleware.RequirePermission("goals:view"), goalHandler.GetMetricBatchTransitionHistory)
-		goals.Post("/bulk", authMiddleware.RequirePermission("goals:update"), goalHandler.BulkAction)
-		// Analytics routes (must be before /:id catch-all)
-		goals.Get("/analytics/stats", authMiddleware.RequirePermission("goals:view"), goalAnalyticsHandler.GetGoalStats)
-		goals.Get("/analytics/distributions", authMiddleware.RequirePermission("goals:view"), goalAnalyticsHandler.GetDistributions)
-		goals.Get("/analytics/progress", authMiddleware.RequirePermission("goals:view"), goalAnalyticsHandler.GetProgressSummary)
-		goals.Get("/analytics/at-risk", authMiddleware.RequirePermission("goals:view"), goalAnalyticsHandler.GetAtRiskGoals)
-		goals.Get("/analytics/trends", authMiddleware.RequirePermission("goals:view"), goalAnalyticsHandler.GetTrendData)
-		goals.Get("/analytics/okr-tree", authMiddleware.RequirePermission("goals:view"), goalAnalyticsHandler.GetOKRTree)
-		goals.Post("/", authMiddleware.RequirePermission("goals:create"), goalHandler.CreateGoal)
-		goals.Get("/", authMiddleware.RequirePermission("goals:view"), goalHandler.ListGoals)
-		goals.Get("/:id/activity", authMiddleware.RequirePermission("goals:view"), goalHandler.GetGoalActivity)
-		goals.Post("/:id/comments", authMiddleware.RequirePermission("goals:update"), goalHandler.AddGoalComment)
-		goals.Get("/:id/comments", authMiddleware.RequirePermission("goals:view"), goalHandler.ListGoalComments)
-		goals.Delete("/comments/:cid", authMiddleware.RequirePermission("goals:update"), goalHandler.DeleteGoalComment)
-		goals.Get("/:id", authMiddleware.RequirePermission("goals:view"), goalHandler.GetGoal)
-		goals.Put("/:id", authMiddleware.RequirePermission("goals:update"), goalHandler.UpdateGoal)
-		goals.Delete("/:id", authMiddleware.RequirePermission("goals:delete"), goalHandler.DeleteGoal)
-		goals.Post("/:id/transition", authMiddleware.RequirePermission("goals:update"), goalHandler.TransitionStatus)
-		goals.Post("/:id/clone", authMiddleware.RequirePermission("goals:create"), goalHandler.CloneGoal)
-		goals.Get("/:id/children", authMiddleware.RequirePermission("goals:view"), goalHandler.ListChildGoals)
-		goals.Get("/:id/tree", authMiddleware.RequirePermission("goals:view"), goalHandler.GetGoalTree)
-		goals.Post("/:id/check-ins", authMiddleware.RequirePermission("goals:update"), goalHandler.CreateCheckIn)
-		goals.Get("/:id/check-ins", authMiddleware.RequirePermission("goals:view"), goalHandler.ListCheckIns)
-		goals.Delete("/check-ins/:id", authMiddleware.RequirePermission("goals:update"), goalHandler.DeleteCheckIn)
-		goals.Post("/:id/collaborators", authMiddleware.RequirePermission("goals:assign"), goalHandler.AddCollaborator)
-		goals.Delete("/:id/collaborators/:user_id", authMiddleware.RequirePermission("goals:assign"), goalHandler.RemoveCollaborator)
-		goals.Post("/:gid/metrics", authMiddleware.RequirePermission("goals:update"), goalHandler.CreateMetric)
-		goals.Put("/metrics/:id", authMiddleware.RequirePermission("goals:update"), goalHandler.UpdateMetric)
-		goals.Delete("/metrics/:id", authMiddleware.RequirePermission("goals:update"), goalHandler.DeleteMetric)
-		goals.Put("/metrics/:id/value", authMiddleware.RequirePermission("goals:update"), goalHandler.UpdateMetricValue)
-		goals.Get("/metrics/:id/history", authMiddleware.RequirePermission("goals:view"), goalHandler.GetMetricHistory)
-		goals.Post("/:gid/evidences", authMiddleware.RequirePermission("goals:update"), goalHandler.UploadEvidence)
-		goals.Get("/:gid/evidences", authMiddleware.RequirePermission("goals:view"), goalHandler.ListEvidences)
-		goals.Get("/evidences/:id", authMiddleware.RequirePermission("goals:view"), goalHandler.GetEvidence)
-		goals.Get("/evidences/:id/preview", authMiddleware.RequirePermission("goals:view"), goalHandler.GetEvidencePreview)
-		goals.Get("/evidences/:id/download", authMiddleware.RequirePermission("goals:view"), goalHandler.DownloadEvidence)
-		goals.Delete("/evidences/:id", authMiddleware.RequirePermission("goals:update"), goalHandler.DeleteEvidence)
-		goals.Put("/evidences/:id/file", authMiddleware.RequirePermission("goals:update"), goalHandler.ReplaceEvidenceFile)
-		goals.Get("/evidences/:id/available-transitions", authMiddleware.RequirePermission("goals:view"), goalHandler.GetAvailableEvidenceTransitions)
-		goals.Post("/evidences/:id/transition", authMiddleware.RequirePermission("goals:update"), goalHandler.ExecuteEvidenceTransition)
-		goals.Get("/evidences/:id/transition-history", authMiddleware.RequirePermission("goals:view"), goalHandler.GetEvidenceTransitionHistory)
-
-		// ---- METRIC APPROVAL WORKFLOW ROUTES ----
-		goalMetrics := v1.Group("/goal-metrics", authMiddleware.Authenticate(), licenseMiddleware.RequireLicensedFeature(string(licensing.FeatureGoals)))
-		goalMetrics.Get("/:id/available-transitions", authMiddleware.RequirePermission("goals:view"), goalHandler.GetAvailableMetricTransitions)
-		goalMetrics.Post("/:id/transition", authMiddleware.RequirePermission("goals:approve"), goalHandler.TransitionMetric)
-
-		goalMetricValueChanges := v1.Group("/goal-metric-value-changes", authMiddleware.Authenticate(), licenseMiddleware.RequireLicensedFeature(string(licensing.FeatureGoals)))
-		goalMetricValueChanges.Get("/:id/available-transitions", authMiddleware.RequirePermission("goals:view"), goalHandler.GetAvailableMetricValueChangeTransitions)
-		goalMetricValueChanges.Post("/:id/transition", authMiddleware.RequirePermission("goals:approve"), goalHandler.TransitionMetricValueChange)
-
-		// Per-metric value-change history (any caller with access to the parent goal)
-		goals.Get("/:id/metrics/:metric_id/value-changes", authMiddleware.RequirePermission("goals:view"), goalHandler.ListMetricValueChanges)
-
-		// ---- APPROVAL ROUTES ----
-		approvals := v1.Group("/approvals", authMiddleware.Authenticate(), licenseMiddleware.RequireLicensedFeature(string(licensing.FeatureGoals)))
-		approvals.Get("/pending", authMiddleware.RequirePermission("goals:approve"), goalHandler.ListPendingApprovals)
-		approvals.Get("/completed", authMiddleware.RequirePermission("goals:approve"), goalHandler.ListCompletedApprovals)
-		approvals.Get("/pending-metrics", authMiddleware.RequirePermission("goals:approve"), goalHandler.ListPendingMetricApprovals)
-		approvals.Get("/pending-metric-value-changes", authMiddleware.RequirePermission("goals:approve"), goalHandler.ListPendingMetricValueChangeApprovals)
-
-		// ---- PERFORMANCE REVIEW ROUTES ----
-		reviews := v1.Group("/reviews", authMiddleware.Authenticate(), licenseMiddleware.RequireLicensedFeature(string(licensing.FeatureGoals)))
-		reviews.Post("/cycles", authMiddleware.RequirePermission("goals:update"), reviewHandler.CreateCycle)
-		reviews.Get("/cycles", authMiddleware.RequirePermission("goals:view"), reviewHandler.ListCycles)
-		reviews.Get("/cycles/:id", authMiddleware.RequirePermission("goals:view"), reviewHandler.GetCycle)
-		reviews.Put("/cycles/:id", authMiddleware.RequirePermission("goals:update"), reviewHandler.UpdateCycle)
-		reviews.Delete("/cycles/:id", authMiddleware.RequirePermission("goals:delete"), reviewHandler.DeleteCycle)
-		reviews.Post("/cycles/:id/activate", authMiddleware.RequirePermission("goals:update"), reviewHandler.ActivateCycle)
-		reviews.Post("/cycles/:id/complete", authMiddleware.RequirePermission("goals:update"), reviewHandler.CompleteCycle)
-		reviews.Post("/cycles/:id/assignments", authMiddleware.RequirePermission("goals:assign"), reviewHandler.AssignReviewees)
-		reviews.Get("/cycles/:id/assignments", authMiddleware.RequirePermission("goals:view"), reviewHandler.ListCycleAssignments)
-		reviews.Delete("/assignments/:id", authMiddleware.RequirePermission("goals:assign"), reviewHandler.RemoveAssignment)
-		reviews.Get("/assignments/:id", authMiddleware.RequirePermission("goals:view"), reviewHandler.GetAssignment)
-		reviews.Post("/assignments/:id/score", authMiddleware.RequirePermission("goals:update"), reviewHandler.ScoreGoals)
-		reviews.Post("/assignments/:id/submit", authMiddleware.RequirePermission("goals:update"), reviewHandler.SubmitReview)
-		reviews.Get("/my-reviews", authMiddleware.RequirePermission("goals:view"), reviewHandler.ListMyReviews)
-		reviews.Get("/my-review-tasks", authMiddleware.RequirePermission("goals:view"), reviewHandler.ListMyReviewTasks)
-
-		// ---- DOCUMENT MANAGEMENT ROUTES ----
-		docs := v1.Group("/documents", authMiddleware.Authenticate(), licenseMiddleware.RequireLicensedFeature(string(licensing.FeatureDocuments)))
-		docs.Get("/files", authMiddleware.RequirePermission("goals:view"), documentHandler.ListFiles)
-		docs.Post("/search", authMiddleware.RequirePermission("goals:view"), documentHandler.SearchFiles)
-		docs.Get("/files/:id/info", authMiddleware.RequirePermission("goals:view"), documentHandler.GetFileInfo)
-		docs.Get("/files/:id/breadcrumb", authMiddleware.RequirePermission("goals:view"), documentHandler.GetFileBreadcrumb)
-		docs.Get("/files/:id/preview", authMiddleware.RequirePermission("goals:view"), documentHandler.GetPreviewURL)
-		docs.Get("/files/:id/download", authMiddleware.RequirePermission("goals:view"), documentHandler.DownloadFile)
-		docs.Get("/files/:id/comments", authMiddleware.RequirePermission("goals:view"), documentHandler.GetComments)
-		docs.Post("/files/:id/comments", authMiddleware.RequirePermission("goals:update"), documentHandler.AddComment)
-		docs.Get("/files/:id/tags", authMiddleware.RequirePermission("goals:view"), documentHandler.GetTags)
-		docs.Put("/files/:id/tags", authMiddleware.RequirePermission("goals:update"), documentHandler.SetTags)
-		docs.Get("/files/:id/versions", authMiddleware.RequirePermission("goals:view"), documentHandler.ListVersions)
-		docs.Post("/files/:id/versions", authMiddleware.RequirePermission("goals:update"), documentHandler.UploadVersion)
-		docs.Get("/versions/:vid/download", authMiddleware.RequirePermission("goals:view"), documentHandler.DownloadVersion)
-		docs.Post("/files/:id/versions/rollback", authMiddleware.RequirePermission("goals:update"), documentHandler.RollbackVersion)
-	} // end cfg.GoalManagement.Enabled
-
-	// ---- KPI MASTER DATA ROUTES ----
-	kpi := v1.Group("/kpi", authMiddleware.Authenticate(), kpiAccess.LoadScope())
-
-	// The current user's per-KPI collaborator access (drives which KPI
-	// actions the client offers).
-	kpi.Get("/my-access", kpiAccess.GetMyAccess)
-
-	// Dashboard
-	kpi.Get("/dashboard", authMiddleware.RequirePermission("kpi:view"), kpiDashboardHandler.GetDashboard)
-
-	// Performance bands (RAG thresholds)
-	kpi.Get("/performance-bands", authMiddleware.RequirePermission("kpi:view"), kpiPerformanceBandHandler.ListBands)
-	kpi.Get("/performance-bands/effective", authMiddleware.RequirePermission("kpi:view"), kpiPerformanceBandHandler.GetEffectiveBand)
-	kpi.Post("/performance-bands", authMiddleware.RequirePermission("goals:manage"), kpiPerformanceBandHandler.UpsertBand)
-	kpi.Delete("/performance-bands/:id", authMiddleware.RequirePermission("goals:manage"), kpiPerformanceBandHandler.DeleteBand)
-
-	kpi.Get("/pillars", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListPillars)
-	kpi.Post("/pillars", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.CreatePillar)
-	kpi.Put("/pillars/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.UpdatePillar)
-	kpi.Delete("/pillars/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.DeletePillar)
-
-	kpi.Get("/enablers", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListEnablers)
-	kpi.Post("/enablers", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.CreateEnabler)
-	kpi.Put("/enablers/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.UpdateEnabler)
-	kpi.Delete("/enablers/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.DeleteEnabler)
-
-	kpi.Get("/operational-objectives", authMiddleware.RequirePermission("goals:manage", "kpi:view"), kpiMasterDataHandler.ListOperationalObjectives)
-	kpi.Post("/operational-objectives", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.CreateOperationalObjective)
-	kpi.Put("/operational-objectives/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.UpdateOperationalObjective)
-	kpi.Delete("/operational-objectives/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.DeleteOperationalObjective)
-	kpi.Get("/operational-objectives/:id/kpis", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListKpisForOperationalObjective)
-	kpi.Get("/operational-objectives/:id/collaborators", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListCollaboratorsForOperationalObjective)
-	kpi.Get("/operational-objectives/:id/evidence", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListEvidenceForOperationalObjective)
-
-	kpi.Get("/processes", authMiddleware.RequirePermission("goals:manage", "kpi:view"), kpiMasterDataHandler.ListProcesses)
-	kpi.Post("/processes", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.CreateProcess)
-	kpi.Put("/processes/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.UpdateProcess)
-	kpi.Delete("/processes/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.DeleteProcess)
-	kpi.Get("/processes/:id/kpis", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListKpisForProcess)
-	kpi.Get("/processes/:id/collaborators", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListCollaboratorsForProcess)
-	kpi.Get("/processes/:id/evidence", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListEvidenceForProcess)
-
-	kpi.Get("/initiatives", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListInitiatives)
-	kpi.Post("/initiatives", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.CreateInitiative)
-	kpi.Put("/initiatives/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.UpdateInitiative)
-	kpi.Delete("/initiatives/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.DeleteInitiative)
-
-	kpi.Get("/domains", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListDomains)
-	kpi.Post("/domains", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.CreateDomain)
-	kpi.Put("/domains/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.UpdateDomain)
-	kpi.Delete("/domains/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.DeleteDomain)
-	kpi.Get("/award-kpi-measures", authMiddleware.RequirePermission("goals:manage", "kpi:view"), kpiMasterDataHandler.ListAwardKpiMeasures)
-	kpi.Get("/award-kpi-measures/:id", authMiddleware.RequirePermission("goals:manage", "kpi:view"), kpiMasterDataHandler.GetAwardKpiMeasure)
-	kpi.Post("/award-kpi-measures", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.CreateAwardKpiMeasure)
-	kpi.Put("/award-kpi-measures/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.UpdateAwardKpiMeasure)
-	kpi.Delete("/award-kpi-measures/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.DeleteAwardKpiMeasure)
-
-	kpi.Get("/award-criteria", authMiddleware.RequirePermission("goals:manage", "kpi:view"), kpiMasterDataHandler.ListAwardCriteria)
-	kpi.Post("/award-criteria", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.CreateAwardCriterion)
-	kpi.Put("/award-criteria/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.UpdateAwardCriterion)
-	kpi.Delete("/award-criteria/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.DeleteAwardCriterion)
-	kpi.Get("/award-criteria/:id/kpis", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListKpisForAwardCriterion)
-	kpi.Get("/award-criteria/:id/collaborators", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListCollaboratorsForAwardCriterion)
-	kpi.Get("/award-criteria/:id/evidence", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListEvidenceForAwardCriterion)
-
-	kpi.Get("/award-criteria/:criterionId/sub-criteria", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListAwardSubCriteria)
-	kpi.Post("/award-criteria/:criterionId/sub-criteria", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.CreateAwardSubCriterion)
-	kpi.Get("/award-sub-criteria", authMiddleware.RequirePermission("goals:manage", "kpi:view"), kpiMasterDataHandler.ListAwardSubCriteria)
-	kpi.Put("/award-sub-criteria/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.UpdateAwardSubCriterion)
-	kpi.Delete("/award-sub-criteria/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.DeleteAwardSubCriterion)
-	kpi.Get("/award-sub-criteria/:id/kpis", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListKpisForAwardSubCriterion)
-	kpi.Get("/award-sub-criteria/:id/collaborators", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListCollaboratorsForAwardSubCriterion)
-	kpi.Get("/award-sub-criteria/:id/evidence", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListEvidenceForAwardSubCriterion)
-
-	kpi.Get("/data-sources", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListDataSources)
-	kpi.Post("/data-sources", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.CreateDataSource)
-	kpi.Put("/data-sources/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.UpdateDataSource)
-	kpi.Delete("/data-sources/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.DeleteDataSource)
-
-	kpi.Get("/segmentation-dimensions", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListSegmentationDimensions)
-	kpi.Post("/segmentation-dimensions", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.CreateSegmentationDimension)
-	kpi.Put("/segmentation-dimensions/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.UpdateSegmentationDimension)
-	kpi.Delete("/segmentation-dimensions/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.DeleteSegmentationDimension)
-
-	kpi.Get("/organizations", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.ListOrganizations)
-	kpi.Post("/organizations", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.CreateOrganization)
-	kpi.Put("/organizations/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.UpdateOrganization)
-	kpi.Delete("/organizations/:id", authMiddleware.RequirePermission("goals:manage"), kpiMasterDataHandler.DeleteOrganization)
-
-	kpi.Get("/:type/:id/segmentation-axes", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiMasterDataHandler.ListSegmentationAxes)
-	kpi.Post("/:type/:id/segmentation-axes", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionEditKpi, handlers.KpiFromPath), kpiMasterDataHandler.AddSegmentationAxis)
-	kpi.Delete("/segmentation-axes/:id", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionEditKpi, handlers.KpiOfRecord("kpi_segmentation_axis", "id")), kpiMasterDataHandler.DeleteSegmentationAxis)
-
-	kpi.Get("/:type/:id/administrative-units", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiMasterDataHandler.ListAdministrativeUnits)
-	kpi.Post("/:type/:id/administrative-units", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionEditKpi, handlers.KpiFromPath), kpiMasterDataHandler.AddAdministrativeUnit)
-	kpi.Delete("/administrative-units/:id", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionEditKpi, handlers.KpiOfRecord("kpi_administrative_units", "id")), kpiMasterDataHandler.DeleteAdministrativeUnit)
-
-	// ---- KPI EVIDENCE FOLDER CONFIGURATION ROUTES ----
-	// Taxonomy-parameterized (not KPI-id-parameterized) so they work from the
-	// create form before a KPI is ever saved.
-	kpi.Get("/documenta/anchor", authMiddleware.RequirePermission("kpi:create", "kpi:update"), kpiDocumentaHandler.ResolveAnchor)
-	kpi.Get("/documenta/folders", authMiddleware.RequirePermission("kpi:create", "kpi:update"), kpiDocumentaHandler.ListFolders)
-	kpi.Post("/documenta/folders", authMiddleware.RequirePermission("kpi:create", "kpi:update"), kpiDocumentaHandler.CreateFolder)
-	kpi.Get("/documenta/folders/:id", authMiddleware.RequirePermission("kpi:view"), kpiDocumentaHandler.GetFolderInfo)
-
-	// ---- KPI DICTIONARY ROUTES ----
-	// Bulk import from the KPI Dictionary workbook: validate = dry run
-	// (validation report + preview), commit = re-validate and apply.
-	kpi.Get("/dictionary-import/template", authMiddleware.RequirePermission("kpi:create"), kpiImportHandler.Template)
-	kpi.Post("/dictionary-import/validate", authMiddleware.RequirePermission("kpi:create"), kpiImportHandler.Validate)
-	kpi.Post("/dictionary-import/commit", authMiddleware.RequirePermission("kpi:create"), kpiImportHandler.Commit)
-
-	// Bulk import of KPI metrics (KpiMetric rows under existing KPIs).
-	kpi.Get("/metrics-import/template", authMiddleware.RequirePermission("kpi:create"), kpiImportHandler.MetricsTemplate)
-	kpi.Post("/metrics-import/validate", authMiddleware.RequirePermission("kpi:create"), kpiImportHandler.ValidateMetrics)
-	kpi.Post("/metrics-import/commit", authMiddleware.RequirePermission("kpi:create"), kpiImportHandler.CommitMetrics)
-
-	// Bulk import for every Master Data tab (pillars, enablers, objectives,
-	// processes, initiatives, domains, award criteria/sub-criteria/measures,
-	// data sources, segmentation dimensions, organizations). The type query
-	// parameter selects the entity and the workbook's matching sheet.
-	kpi.Get("/master-data-import/template", authMiddleware.RequirePermission("goals:manage"), kpiImportHandler.MasterDataTemplate)
-	kpi.Post("/master-data-import/validate", authMiddleware.RequirePermission("goals:manage"), kpiImportHandler.ValidateMasterData)
-	kpi.Post("/master-data-import/commit", authMiddleware.RequirePermission("goals:manage"), kpiImportHandler.CommitMasterData)
-	kpi.Get("/strategic", authMiddleware.RequirePermission("kpi:view"), kpiDictionaryHandler.ListStrategic)
-	kpi.Get("/strategic/:id", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiOfType("strategic")), kpiDictionaryHandler.GetStrategic)
-	kpi.Post("/strategic", authMiddleware.RequirePermission("kpi:create"), kpiDictionaryHandler.CreateStrategic)
-	kpi.Put("/strategic/:id", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionEditKpi, handlers.KpiOfType("strategic")), kpiDictionaryHandler.UpdateStrategic)
-	kpi.Delete("/strategic/:id", authMiddleware.RequirePermission("kpi:delete"), kpiAccess.Require(services.KpiActionEditKpi, handlers.KpiOfType("strategic")), kpiDictionaryHandler.DeleteStrategic)
-
-	kpi.Get("/operational", authMiddleware.RequirePermission("kpi:view"), kpiDictionaryHandler.ListOperational)
-	kpi.Get("/operational/:id", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiOfType("operational")), kpiDictionaryHandler.GetOperational)
-	kpi.Post("/operational", authMiddleware.RequirePermission("kpi:create"), kpiDictionaryHandler.CreateOperational)
-	kpi.Put("/operational/:id", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionEditKpi, handlers.KpiOfType("operational")), kpiDictionaryHandler.UpdateOperational)
-	kpi.Delete("/operational/:id", authMiddleware.RequirePermission("kpi:delete"), kpiAccess.Require(services.KpiActionEditKpi, handlers.KpiOfType("operational")), kpiDictionaryHandler.DeleteOperational)
-
-	kpi.Get("/award", authMiddleware.RequirePermission("kpi:view"), kpiDictionaryHandler.ListAward)
-	kpi.Get("/award/:id", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiOfType("award")), kpiDictionaryHandler.GetAward)
-	kpi.Post("/award", authMiddleware.RequirePermission("kpi:create"), kpiDictionaryHandler.CreateAward)
-	kpi.Put("/award/:id", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionEditKpi, handlers.KpiOfType("award")), kpiDictionaryHandler.UpdateAward)
-	kpi.Delete("/award/:id", authMiddleware.RequirePermission("kpi:delete"), kpiAccess.Require(services.KpiActionEditKpi, handlers.KpiOfType("award")), kpiDictionaryHandler.DeleteAward)
-
-	// ---- KPI PERFORMANCE ROUTES (must be before /:type/:id/transition to avoid route conflict) ----
-	// Bulk import of KPI targets (KpiAnnualTarget rows under existing KPIs).
-	kpi.Get("/targets-import/template", authMiddleware.RequirePermission("targets:set"), kpiImportHandler.TargetsTemplate)
-	kpi.Post("/targets-import/validate", authMiddleware.RequirePermission("targets:set"), kpiImportHandler.ValidateTargets)
-	kpi.Post("/targets-import/commit", authMiddleware.RequirePermission("targets:set"), kpiImportHandler.CommitTargets)
-	kpi.Get("/targets", authMiddleware.RequirePermission("targets:view"), kpiPerformanceHandler.ListTargets)
-	kpi.Post("/targets", authMiddleware.RequirePermission("targets:set"), kpiAccess.Require(services.KpiActionManageTargets, handlers.KpiFromBodyCode), kpiPerformanceHandler.SetTarget)
-	kpi.Put("/targets/:id", authMiddleware.RequirePermission("targets:set"), kpiAccess.Require(services.KpiActionManageTargets, handlers.KpiOfCodedRecord("kpi_annual_targets", "id")), kpiPerformanceHandler.UpdateTarget)
-	// RequirePermission is OR-based (any of these grants route access) — the
-	// finer-grained approve-vs-reject split happens inside TransitionTarget
-	// itself, since the action (approve/reject/return) isn't known until the
-	// request body is parsed.
-	kpi.Post("/targets/:id/transition", authMiddleware.RequirePermission("targets:approve", "targets:reject"), kpiAccess.RequireTransition(handlers.KpiOfCodedRecord("kpi_annual_targets", "id")), kpiPerformanceHandler.TransitionTarget)
-	kpi.Delete("/targets/:id", authMiddleware.RequirePermission("targets:delete"), kpiAccess.Require(services.KpiActionManageTargets, handlers.KpiOfCodedRecord("kpi_annual_targets", "id")), kpiPerformanceHandler.DeleteTarget)
-
-	kpi.Get("/performance", authMiddleware.RequirePermission("perf:view"), kpiPerformanceHandler.ListPerformance)
-	kpi.Get("/performance/:id", authMiddleware.RequirePermission("perf:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiOfCodedRecord("kpi_performances", "id")), kpiPerformanceHandler.GetPerformance)
-	kpi.Post("/performance", authMiddleware.RequirePermission("perf:submit"), kpiAccess.Require(services.KpiActionCreateEntry, handlers.KpiFromBodyCode), kpiPerformanceHandler.SubmitPerformance)
-	kpi.Put("/performance/:id", authMiddleware.RequirePermission("perf:submit"), kpiAccess.Require(services.KpiActionCreateEntry, handlers.KpiOfCodedRecord("kpi_performances", "id")), kpiPerformanceHandler.UpdatePerformance)
-	kpi.Delete("/performance/:id", authMiddleware.RequirePermission("perf:submit"), kpiAccess.Require(services.KpiActionCreateEntry, handlers.KpiOfCodedRecord("kpi_performances", "id")), kpiPerformanceHandler.DeletePerformance)
-	kpi.Post("/performance/:id/transition", authMiddleware.RequirePermission("perf:review"), kpiAccess.RequireTransition(handlers.KpiOfCodedRecord("kpi_performances", "id")), kpiPerformanceHandler.TransitionPerformance)
-	kpi.Get("/performance/:id/transitions", authMiddleware.RequirePermission("perf:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiOfCodedRecord("kpi_performances", "id")), kpiPerformanceHandler.GetAvailableTransitions)
-	kpi.Get("/performance/:id/history", authMiddleware.RequirePermission("perf:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiOfCodedRecord("kpi_performances", "id")), kpiPerformanceHandler.GetPerformanceHistory)
-	kpi.Get("/performance/:id/evidence", authMiddleware.RequirePermission("perf:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiOfCodedRecord("kpi_performances", "id")), kpiPerformanceHandler.ListPerformanceEvidence)
-	kpi.Post("/performance/:id/evidence", authMiddleware.RequirePermission("perf:submit"), kpiAccess.Require(services.KpiActionCreateEntry, handlers.KpiOfCodedRecord("kpi_performances", "id")), kpiPerformanceHandler.CreatePerformanceEvidence)
-	kpi.Delete("/performance/:id/evidence/:evidenceId", authMiddleware.RequirePermission("perf:submit"), kpiAccess.Require(services.KpiActionCreateEntry, handlers.KpiOfCodedRecord("kpi_performances", "id")), kpiPerformanceHandler.DeletePerformanceEvidence)
-
-	// These entries/* routes must be registered BEFORE the /:type/:id/transition
-	// wildcard below — Fiber matches routes in registration order, and "entries"
-	// would otherwise satisfy the :type param and swallow these requests.
-	kpi.Post("/entries/:entryId/transition", authMiddleware.RequirePermission("perf:review"), kpiAccess.RequireTransition(handlers.KpiOfRecord("kpi_entries", "entryId")), kpiEntryHandler.TransitionEntry)
-	kpi.Get("/entries/:entryId/transitions", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiOfRecord("kpi_entries", "entryId")), kpiEntryHandler.GetAvailableEntryTransitions)
-	kpi.Get("/entries/:entryId/history", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiOfRecord("kpi_entries", "entryId")), kpiEntryHandler.GetEntryHistory)
-	kpi.Post("/entries/:entryId/corrections", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionCreateEntry, handlers.KpiOfRecord("kpi_entries", "entryId")), kpiEntryHandler.CreateCorrection)
-
-	kpi.Get("/:type/:id/transitions", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiDictionaryHandler.GetAvailableTransitions)
-	kpi.Post("/:type/:id/transition", authMiddleware.RequirePermission("kpi:update"), kpiAccess.RequireTransition(handlers.KpiFromPath), kpiDictionaryHandler.TransitionKpi)
-
-	kpi.Get("/:type/:id/card", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiComposedHandler.GetKpiCard)
-	kpi.Get("/:type/:id/dashboard", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiComposedHandler.GetKpiDashboard)
-	kpi.Put("/:type/:id/narrative", authMiddleware.RequirePermission("perf:submit"), kpiAccess.Require(services.KpiActionCreateEntry, handlers.KpiFromPath), kpiComposedHandler.UpdateNarrative)
-	kpi.Get("/:type/:id/annual-rollup", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiComposedHandler.GetKpiAnnualRollup)
-	kpi.Get("/:type/:id/metrics/:metricId/period-rollup", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiAccess.Require(services.KpiActionView, handlers.KpiOfRecord("kpi_metrics", "metricId")), kpiComposedHandler.GetMetricPeriodRollup)
-	kpi.Get("/:type/:id/metrics/:metricId/display-rollup", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiAccess.Require(services.KpiActionView, handlers.KpiOfRecord("kpi_metrics", "metricId")), kpiComposedHandler.GetMetricDisplayRollup)
-	kpi.Get("/:type/:id/metrics/:metricId/period-series", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiAccess.Require(services.KpiActionView, handlers.KpiOfRecord("kpi_metrics", "metricId")), kpiComposedHandler.GetMetricPeriodSeries)
-	kpi.Get("/:type/:id/composite-score", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiComposedHandler.GetCompositeScore)
-	kpi.Get("/:type/:id/composite-score-latest", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiComposedHandler.GetCompositeScoreLatest)
-
-	// KPI engagement features — metrics, evidence, collaborators, check-ins, comments, activity
-	kpi.Get("/metrics-by-code/:code", authMiddleware.RequirePermission("kpi:view"), kpiEngagementHandler.ListMetricsByCode)
-
-	// KPI Entries
-	kpi.Get("/entries", authMiddleware.RequirePermission("kpi:view"), kpiEntryHandler.ListAllEntries)
-	kpi.Get("/:type/:id/entries", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiEntryHandler.ListEntries)
-	kpi.Post("/:type/:id/entries", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionCreateEntry, handlers.KpiFromPath), kpiEntryHandler.CreateEntry)
-	kpi.Put("/:type/:id/entries/:entryId", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionCreateEntry, handlers.KpiOfRecord("kpi_entries", "entryId")), kpiEntryHandler.UpdateEntry)
-	kpi.Delete("/:type/:id/entries/:entryId", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionCreateEntry, handlers.KpiOfRecord("kpi_entries", "entryId")), kpiEntryHandler.DeleteEntry)
-	kpi.Get("/entries/:entryId/evidence", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiOfRecord("kpi_entries", "entryId")), kpiEntryHandler.ListEntryEvidence)
-
-	kpi.Get("/:type/:id/metrics", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiEngagementHandler.ListMetrics)
-	kpi.Post("/:type/:id/metrics", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionEditKpi, handlers.KpiFromPath), kpiEngagementHandler.CreateMetric)
-	kpi.Post("/:type/:id/attachment", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionEditKpi, handlers.KpiFromPath), kpiEngagementHandler.UploadAttachment)
-	kpi.Put("/metrics/:id", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionEditKpi, handlers.KpiOfRecord("kpi_metrics", "id")), kpiEngagementHandler.UpdateMetric)
-	kpi.Put("/metrics/:id/value", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionCreateEntry, handlers.KpiOfRecord("kpi_metrics", "id")), kpiEngagementHandler.UpdateMetricValue)
-	kpi.Get("/metrics/:id/baseline-revisions", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiOfRecord("kpi_metrics", "id")), kpiEngagementHandler.ListBaselineRevisions)
-	kpi.Post("/metrics/:id/baseline-revisions", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionEditKpi, handlers.KpiOfRecord("kpi_metrics", "id")), kpiEngagementHandler.RequestBaselineRevision)
-	kpi.Post("/baseline-revisions/:revisionId/review", authMiddleware.RequirePermission("kpi:approve"), kpiAccess.Require(services.KpiActionApprove, handlers.KpiOfRecord("kpi_baseline_revisions", "revisionId")), kpiEngagementHandler.ReviewBaselineRevision)
-	kpi.Delete("/metrics/:id", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionEditKpi, handlers.KpiOfRecord("kpi_metrics", "id")), kpiEngagementHandler.DeleteMetric)
-
-	kpi.Get("/:type/:id/evidence", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiEngagementHandler.ListEvidence)
-	kpi.Post("/:type/:id/evidence", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionCreateEntry, handlers.KpiFromPath), kpiEngagementHandler.CreateEvidence)
-	kpi.Delete("/evidence/:id", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionCreateEntry, handlers.KpiOfRecord("kpi_evidences", "id")), kpiEngagementHandler.DeleteEvidence)
-	kpi.Get("/evidence/:id/download", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiOfRecord("kpi_evidences", "id")), kpiEngagementHandler.DownloadEvidence)
-
-	kpi.Get("/:type/:id/collaborators", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiEngagementHandler.ListCollaborators)
-	kpi.Post("/:type/:id/collaborators", authMiddleware.RequirePermission("kpi:assign"), kpiAccess.Require(services.KpiActionManageCollaborators, handlers.KpiFromPath), kpiEngagementHandler.AddCollaborator)
-	kpi.Delete("/:type/:id/collaborators/:user_id", authMiddleware.RequirePermission("kpi:assign"), kpiAccess.Require(services.KpiActionManageCollaborators, handlers.KpiFromPath), kpiEngagementHandler.RemoveCollaborator)
-
-	kpi.Get("/:type/:id/collaborator-assignments", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiCollaboratorHandler.ListAssignments)
-	kpi.Get("/collaborator-assignments/:assignmentId", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiOfRecord("kpi_collaborator_assignments", "assignmentId")), kpiCollaboratorHandler.GetAssignment)
-	kpi.Post("/:type/:id/collaborator-assignments", authMiddleware.RequirePermission("kpi:assign"), kpiAccess.Require(services.KpiActionManageCollaborators, handlers.KpiFromPath), kpiCollaboratorHandler.CreateAssignment)
-	kpi.Put("/collaborator-assignments/:assignmentId", authMiddleware.RequirePermission("kpi:assign"), kpiAccess.Require(services.KpiActionManageCollaborators, handlers.KpiOfRecord("kpi_collaborator_assignments", "assignmentId")), kpiCollaboratorHandler.UpdateAssignment)
-	kpi.Delete("/collaborator-assignments/:assignmentId", authMiddleware.RequirePermission("kpi:assign"), kpiAccess.Require(services.KpiActionManageCollaborators, handlers.KpiOfRecord("kpi_collaborator_assignments", "assignmentId")), kpiCollaboratorHandler.DeleteAssignment)
-	kpi.Get("/collaborator-permission-matrix", authMiddleware.RequirePermission("kpi:view"), kpiCollaboratorHandler.GetPermissionMatrix)
-
-	kpi.Get("/:type/:id/check-ins", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiEngagementHandler.ListCheckIns)
-	kpi.Post("/:type/:id/check-ins", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionContribute, handlers.KpiFromPath), kpiEngagementHandler.CreateCheckIn)
-	kpi.Delete("/check-ins/:id", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionContribute, handlers.KpiOfRecord("kpi_check_ins", "id")), kpiEngagementHandler.DeleteCheckIn)
-
-	kpi.Get("/:type/:id/comments", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiEngagementHandler.ListComments)
-	kpi.Post("/:type/:id/comments", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionContribute, handlers.KpiFromPath), kpiEngagementHandler.AddComment)
-	kpi.Delete("/comments/:id", authMiddleware.RequirePermission("kpi:update"), kpiAccess.Require(services.KpiActionContribute, handlers.KpiOfRecord("kpi_comments", "id")), kpiEngagementHandler.DeleteComment)
-
-	kpi.Get("/:type/:id/activity", authMiddleware.RequirePermission("kpi:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromPath), kpiEngagementHandler.GetActivity)
-
-	kpi.Get("/benchmarks", authMiddleware.RequirePermission("benchmark:manage"), kpiPerformanceHandler.ListBenchmarks)
-	kpi.Post("/benchmarks", authMiddleware.RequirePermission("benchmark:manage"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromBodyCode), kpiPerformanceHandler.CreateBenchmark)
-	kpi.Put("/benchmarks/:id", authMiddleware.RequirePermission("benchmark:manage"), kpiAccess.Require(services.KpiActionView, handlers.KpiOfCodedRecord("kpi_benchmarks", "id")), kpiPerformanceHandler.UpdateBenchmark)
-	kpi.Delete("/benchmarks/:id", authMiddleware.RequirePermission("benchmark:manage"), kpiAccess.Require(services.KpiActionView, handlers.KpiOfCodedRecord("kpi_benchmarks", "id")), kpiPerformanceHandler.DeleteBenchmark)
-	kpi.Get("/benchmarks/summary", authMiddleware.RequirePermission("benchmark:manage"), kpiPerformanceHandler.ListBenchmarkSummary)
-
-	kpi.Get("/segmentation", authMiddleware.RequirePermission("segment:manage"), kpiPerformanceHandler.ListSegmentation)
-	kpi.Post("/segmentation", authMiddleware.RequirePermission("segment:manage"), kpiAccess.Require(services.KpiActionView, handlers.KpiFromBodyCode), kpiPerformanceHandler.CreateSegmentation)
-	kpi.Delete("/segmentation/:id", authMiddleware.RequirePermission("segment:manage"), kpiAccess.Require(services.KpiActionView, handlers.KpiOfCodedRecord("kpi_segmentations", "id")), kpiPerformanceHandler.DeleteSegmentation)
-	kpi.Get("/segmentation/summary", authMiddleware.RequirePermission("segment:manage"), kpiPerformanceHandler.ListSegmentationSummary)
-
-	// ---- KPI CORRECTIVE ACTION ROUTES ----
-	kpi.Get("/corrective-actions", authMiddleware.RequirePermission("perf:view"), kpiAccess.Require(services.KpiActionView, handlers.KpiOfPerformanceQuery), kpiCorrectiveActionHandler.ListByPerformance)
-	kpi.Post("/corrective-actions", authMiddleware.RequirePermission("corrective_action:manage"), kpiAccess.Require(services.KpiActionContribute, handlers.KpiOfPerformanceBody), kpiCorrectiveActionHandler.Create)
-	kpi.Put("/corrective-actions/:id/status", authMiddleware.RequirePermission("corrective_action:manage"), kpiAccess.Require(services.KpiActionContribute, handlers.KpiOfCorrectiveAction), kpiCorrectiveActionHandler.UpdateStatus)
-
-	// ---- KPI DASHBOARD TRENDS & CARDS ----
-	kpi.Get("/dashboard/trends", authMiddleware.RequirePermission("kpi:view"), kpiDashboardHandler.GetDashboardTrends)
-	kpi.Get("/dashboard/cards", authMiddleware.RequirePermission("kpi:view"), kpiDashboardHandler.GetKpiCardDefinitions)
-
-	// ---- GIS ROUTES ----
-	gis := v1.Group("/gis", authMiddleware.Authenticate())
-	gis.Post("/identify", gisHandler.Identify)
 
 	go func() {
 		addr := fmt.Sprintf("%s:%s", cfg.Server.Host, cfg.Server.Port)

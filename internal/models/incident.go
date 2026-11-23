@@ -11,12 +11,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// Cooperation status values for the incident form's two-option dropdown.
-const (
-	CooperationStatusCooperative   = "cooperative"
-	CooperationStatusUncooperative = "uncooperative"
-)
-
 // Incident represents an actual incident or request record
 type Incident struct {
 	ID             uuid.UUID `gorm:"type:uuid;primary_key" json:"id"`
@@ -55,33 +49,6 @@ type Incident struct {
 	DepartmentID *uuid.UUID  `gorm:"type:uuid;index" json:"department_id"`
 	Department   *Department `gorm:"foreignKey:DepartmentID" json:"department,omitempty"`
 
-	// MOMRA external-entity assignment (docs/MOMRA_Outbound_Integration_Spec_v1.0.md §7,
-	// Story D). Distinct from DepartmentID/Department above: DepartmentID is Automax's
-	// general internal routing/queue assignment (also used when *Automax* itself routes
-	// to an EE via resolveEERoutingDepartment); ExternalEntityID specifically means "the
-	// external entity MOMRA currently considers responsible for this incident," which can
-	// in principle diverge from DepartmentID if MOMRA reassigns on its own side. The
-	// receiving mechanism for MOMRA->Automax assignment notifications is not yet defined
-	// by MOMRA (open dependency OD-N2) — this schema ships ahead of that so backend/UI are
-	// ready to wire in once confirmed; ExternalEntityID references the same
-	// Department{Type:"external"} rows used elsewhere in the MOMRA integration.
-	ExternalEntityID         *uuid.UUID  `gorm:"type:uuid;index" json:"external_entity_id"`
-	ExternalEntity           *Department `gorm:"foreignKey:ExternalEntityID" json:"external_entity,omitempty"`
-	ExternalAssignmentStatus string      `gorm:"size:20" json:"external_assignment_status"` // "", "assigned", "resolved", "rejected"
-	ExternalAssignedAt       *time.Time  `json:"external_assigned_at"`
-
-	// AvailableEEList is the exact array of External Entities MOMRA declared eligible
-	// for THIS incident at submission time (InsertIncidents' EEList — see
-	// epm_incident_handler.go's EPMExternalEntity), stored as a dedicated jsonb column
-	// rather than folded into CustomFields below (which is plain text, not queryable) —
-	// following the same GisLocation precedent for structured per-incident JSON that
-	// doesn't warrant its own join table. This is the authoritative allow-list
-	// validateExternalDepartmentAssignment (incident_service.go) checks against when
-	// assigning ExternalEntityID/DepartmentID on a MOMRA-sourced incident: it can be a
-	// strict subset of the classification-wide EE-classification links, so it must be
-	// read from here, not re-derived from classification alone.
-	AvailableEEList datatypes.JSON `gorm:"type:jsonb" json:"available_ee_list"`
-
 	// Location
 	LocationID *uuid.UUID `gorm:"type:uuid;index" json:"location_id"`
 	Location   *Location  `gorm:"foreignKey:LocationID" json:"location,omitempty"`
@@ -109,29 +76,17 @@ type Incident struct {
 	ReadyToCloseDuration  string     `gorm:"size:100" json:"ready_to_close_duration"`
 	ReadyToCloseNotified  bool       `gorm:"default:false" json:"ready_to_close_notified"`
 
-	// Citizen report link delivery tracking (per channel). Set once the closure SMS/email
-	// carrying {{report_url}}/{{report_link}} was sent successfully, so it is not re-sent;
-	// cleared when the incident leaves its terminal state so a re-closure sends a fresh link.
-	ReportLinkSMSSentAt   *time.Time `json:"report_link_sms_sent_at,omitempty"`
-	ReportLinkEmailSentAt *time.Time `json:"report_link_email_sent_at,omitempty"`
-
 	// Partial-Close tracking (set when incident enters a partial_close state)
 	PartialCloseExpiresAt *time.Time `gorm:"index" json:"partial_close_expires_at"`
 	PartialCloseDuration  string     `gorm:"size:100" json:"partial_close_duration"`
 	PartialCloseNotified  bool       `gorm:"default:false" json:"partial_close_notified"`
 
 	// Reporter
-	ReporterID     *uuid.UUID `gorm:"type:uuid;index" json:"reporter_id"`
-	Reporter       *User      `gorm:"foreignKey:ReporterID" json:"reporter,omitempty"`
-	ReporterEmail  string     `gorm:"size:100" json:"reporter_email"`
-	ReporterName   string     `gorm:"size:200" json:"reporter_name"`
-	ReporterPhone  string     `gorm:"size:50" json:"reporter_phone"`
-	CallerIdentity string     `gorm:"size:50;column:caller_identity" json:"caller_identity"`
-
-	// CallerIdentityText: free-text caller identity (max 200), separate from legacy numeric CallerIdentity.
-	CallerIdentityText string `gorm:"size:200;not null;default:'';column:caller_identity_text" json:"caller_identity_text"`
-	// CooperationStatus: dropdown value (empty = not selected). DB flexible; app validates allowed values.
-	CooperationStatus string `gorm:"size:50;not null;default:'';column:cooperation_status" json:"cooperation_status"`
+	ReporterID    *uuid.UUID `gorm:"type:uuid;index" json:"reporter_id"`
+	Reporter      *User      `gorm:"foreignKey:ReporterID" json:"reporter,omitempty"`
+	ReporterEmail string     `gorm:"size:100" json:"reporter_email"`
+	ReporterName  string     `gorm:"size:200" json:"reporter_name"`
+	ReporterPhone string     `gorm:"size:50" json:"reporter_phone"`
 
 	// CreatedByID is the ID of the authenticated user who created the record
 	// (differs from ReporterID when an agent creates it on behalf of a citizen).
@@ -147,8 +102,7 @@ type Incident struct {
 	EvaluationCount int    `gorm:"default:0" json:"evaluation_count"`
 
 	// Custom Fields (JSON)
-	CustomFields string         `gorm:"type:text" json:"custom_fields"`
-	GisLocation  datatypes.JSON `gorm:"type:jsonb" json:"gis_location"`
+	CustomFields string `gorm:"type:text" json:"custom_fields"`
 
 	// Multiple Assignees (many-to-many)
 	Assignees []User `gorm:"many2many:incident_assignees;" json:"assignees,omitempty"`
@@ -157,7 +111,6 @@ type Incident struct {
 	MasterIncidentID    *uuid.UUID  `gorm:"type:uuid;index;column:master_incident_id" json:"master_incident_id,omitempty"`
 	MasterIncident      *Incident   `gorm:"-" json:"master_incident,omitempty"`
 	MergedIncidents     []Incident  `gorm:"-" json:"merged_incidents,omitempty"`
-	FeedbackID          *uuid.UUID  `gorm:"-" json:"-"` // ephemeral: pre-created feedback record ID injected by ExecuteTransition on IsFinalClose
 	PreviousAssigneeIDs []uuid.UUID `gorm:"-" json:"-"` // ephemeral: all historical assignees, injected by ExecuteTransition
 	IsMerged            bool        `gorm:"default:false;index" json:"is_merged"`
 	MergedAt            *time.Time  `json:"merged_at,omitempty"`
@@ -166,9 +119,6 @@ type Incident struct {
 	// Closed Incident Edit Tracking
 	ClosedBy         *uuid.UUID     `gorm:"type:uuid;index" json:"closed_by,omitempty"`
 	PostClosureEdits datatypes.JSON `gorm:"type:jsonb;default:'[]'::jsonb" json:"post_closure_edits,omitempty"`
-
-	// AI Verification flag — set to true when the incident has been verified by AI
-	IsAIVerified bool `gorm:"default:false;index" json:"is_ai_verified"`
 
 	// Related records
 	Comments          []IncidentComment           `gorm:"foreignKey:IncidentID" json:"comments,omitempty"`
@@ -424,10 +374,6 @@ type IncidentCreateRequest struct {
 	ReporterName       string                 `json:"reporter_name" validate:"omitempty,max=200"`
 	ReporterPhone      string                 `json:"reporter_phone" validate:"omitempty,max=20"`
 	AlternateMobile    string                 `json:"alternate_mobile" validate:"omitempty,mobile,max=20"`
-	CallerIdentity     string                 `json:"caller_identity" validate:"omitempty,len=10,numeric,startswith12"`
-	CallerIdentityText string                 `json:"caller_identity_text" validate:"omitempty,max=200"`
-	CooperationStatus  string                 `json:"cooperation_status" validate:"omitempty,oneof=cooperative uncooperative"`
-	GisLocation        json.RawMessage        `json:"gis_location" validate:"omitempty"`
 	CustomFields       json.RawMessage        `json:"custom_fields"`
 	LookupValueIDs     []string               `json:"lookup_value_ids" validate:"omitempty,dive,uuid"`
 	CustomLookupFields map[string]interface{} `json:"custom_lookup_fields"`
@@ -449,7 +395,6 @@ type IncidentUpdateRequest struct {
 	Country            string                 `json:"country"`
 	PostalCode         string                 `json:"postal_code"`
 	DueDate            *string                `json:"due_date"`
-	GisLocation        json.RawMessage        `json:"gis_location" validate:"omitempty"`
 	CustomFields       json.RawMessage        `json:"custom_fields"`
 	LookupValueIDs     []string               `json:"lookup_value_ids" validate:"omitempty,dive,uuid"`
 	Source             string                 `json:"source" validate:"omitempty,max=100"`
@@ -459,8 +404,6 @@ type IncidentUpdateRequest struct {
 	ReporterEmail      string                 `json:"reporter_email" validate:"omitempty,email"`
 	ReporterPhone      string                 `json:"reporter_phone" validate:"omitempty,max=20"`
 	ReporterName       string                 `json:"reporter_name" validate:"omitempty,max=200"`
-	CallerIdentityText *string                `json:"caller_identity_text,omitempty" validate:"omitempty,max=200"`
-	CooperationStatus  *string                `json:"cooperation_status,omitempty" validate:"omitempty,max=20"`
 	// IvrLinkToken is the raw signed token from the SMS URL. When present, the update is
 	// attributed to the citizen's IVR SMS link submission (exact link lookup by token hash).
 	IvrLinkToken string `json:"ivr_link_token"`
@@ -667,8 +610,6 @@ type IncidentFilter struct {
 	ReporterID          []string   `query:"reporter_id" json:"reporter_id" validate:"omitempty,dive,uuid"`
 	ReporterPhone       string     `query:"reporter_phone" json:"reporter_phone" validate:"omitempty"`
 	ReporterPhoneSearch string     `query:"reporter_phone_search" json:"reporter_phone_search" validate:"omitempty,max=50"`
-	CallerIdentity      string     `query:"caller_identity" json:"caller_identity" validate:"omitempty,number"`
-	CooperationStatus   string     `query:"cooperation_status" json:"cooperation_status" validate:"omitempty,oneof=cooperative uncooperative"`
 	SLABreached         *bool      `query:"sla_breached" json:"sla_breached" validate:"omitempty"`
 	RecordType          *string    `query:"record_type" json:"record_type" validate:"omitempty,oneof=incident request complaint query"` // 'incident', 'request', 'complaint', or 'query'
 	Channel             *string    `query:"channel" json:"channel" validate:"omitempty"`                                                // for complaints
@@ -823,13 +764,11 @@ type EpmPortalIncidentResponse struct {
 	ReporterName   string                  `json:"reporter_name"`
 	ReporterEmail  string                  `json:"reporter_email"`
 	ReporterPhone  string                  `json:"reporter_phone"`
-	CallerIdentity string                  `json:"caller_identity"`
 	Address        string                  `json:"address"`
 	Description    string                  `json:"description"`
 	Classification *EpmPortalHierarchyNode `json:"classification"`
 	Location       *EpmPortalHierarchyNode `json:"location"`
 	CurrentState   *EpmPortalStateInfo     `json:"current_state,omitempty"`
-	GisLocation    interface{}             `json:"gis_location,omitempty"`
 }
 
 // BuildNestedHierarchy converts a flat ordered slice of nodes (root→leaf) into a nested chain.
@@ -921,18 +860,13 @@ type IncidentResponse struct {
 	ReporterEmail         string                      `json:"reporter_email"`
 	ReporterName          string                      `json:"reporter_name"`
 	ReporterPhone         string                      `json:"reporter_phone"`
-	CallerIdentity        string                      `json:"caller_identity,omitempty"`
-	CallerIdentityText    string                      `json:"caller_identity_text,omitempty"`
-	CooperationStatus     string                      `json:"cooperation_status,omitempty"`
 	Channel               string                      `json:"channel,omitempty"`
 	TransitionHistory     []TransitionHistoryResponse `json:"transition_history,omitempty"`
 	CreatedByID           *uuid.UUID                  `json:"created_by_id,omitempty"`
 	CreatedByName         string                      `json:"created_by_name,omitempty"`
 	CreatedByMobile       string                      `json:"created_by_mobile,omitempty"`
 	EvaluationCount       int                         `json:"evaluation_count,omitempty"`
-	GisLocation           json.RawMessage             `json:"gis_location,omitempty"`
 	CustomFields          string                      `json:"custom_fields,omitempty"`
-	AvailableEEList       json.RawMessage             `json:"available_ee_list,omitempty"`
 	CommentsCount         int                         `json:"comments_count"`
 	AttachmentsCount      int                         `json:"attachments_count"`
 	CreatedAt             time.Time                   `json:"created_at"`
@@ -1087,23 +1021,17 @@ func ToIncidentResponse(i *Incident) IncidentResponse {
 		ReporterEmail:         i.ReporterEmail,
 		ReporterName:          i.ReporterName,
 		ReporterPhone:         i.ReporterPhone,
-		CallerIdentity:        i.CallerIdentity,
-		CallerIdentityText:    i.CallerIdentityText,
-		CooperationStatus:     i.CooperationStatus,
 		Channel:               i.Channel,
 		CreatedByID:           i.CreatedByID,
 		CreatedByName:         i.CreatedByName,
 		CreatedByMobile:       i.CreatedByMobile,
 		EvaluationCount:       i.EvaluationCount,
-		// TransitionHistory:     i.TransitionHistory, // Include transition history for stats on frontend
-		GisLocation:      json.RawMessage(i.GisLocation),
-		CustomFields:     i.CustomFields,
-		AvailableEEList:  json.RawMessage(i.AvailableEEList),
-		CommentsCount:    len(i.Comments),
-		AttachmentsCount: len(i.Attachments),
-		CreatedAt:        i.CreatedAt,
-		UpdatedAt:        i.UpdatedAt,
-		Version:          i.Version,
+		CustomFields:          i.CustomFields,
+		CommentsCount:         len(i.Comments),
+		AttachmentsCount:      len(i.Attachments),
+		CreatedAt:             i.CreatedAt,
+		UpdatedAt:             i.UpdatedAt,
+		Version:               i.Version,
 	}
 
 	if len(i.TransitionHistory) > 0 {
@@ -1537,8 +1465,6 @@ type IncidentReportData struct {
 	ReadyToCloseByName string     `db:"ready_to_close_by_name"`
 	ReadyToCloseAt     *time.Time `db:"ready_to_close_at"`
 	ClosedByName       string     `db:"closed_by_name"`
-	CallerIdentityText string     `db:"caller_identity_text"`
-	CooperationStatus  string     `db:"cooperation_status"`
 }
 
 // IncidentReportLookupValue is a flat result for lookup (dynamic attribute) values in the report.

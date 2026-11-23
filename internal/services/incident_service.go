@@ -24,7 +24,6 @@ import (
 	"github.com/automax/backend/pkg/i18n"
 	pkgutils "github.com/automax/backend/pkg/utils"
 	"github.com/google/uuid"
-	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -156,19 +155,8 @@ type IncidentService interface {
 	SetFCMService(fcm *FCMService)
 	// SetIntegrationExecutor wires in the IntegrationExecutor (called post-construction).
 	SetIntegrationExecutor(exec IntegrationExecutor)
-	// SetMOMRAStatusSyncService wires in the MOMRA outbound status sync (called
-	// post-construction, same pattern as SetIntegrationExecutor).
-	SetMOMRAStatusSyncService(svc MOMRAStatusSyncService)
 	// SetActionExecutor wires in the ActionExecutor (called post-construction).
 	SetActionExecutor(ae ActionExecutor)
-	// SetPublicFeedbackRepo wires in the feedback repo so IsFinalClose transitions can
-	// pre-create a feedback record and embed a direct GenerateFeedbackToken URL in the SMS.
-	SetPublicFeedbackRepo(repo repository.IncidentPublicFeedbackRepository)
-	// SetSmsFeedbackPendingRepo wires in the SMS feedback pending repo and delay hours.
-	// The SLA monitor will send the SMS only if no WhatsApp response is received within delayHours.
-	SetSmsFeedbackPendingRepo(repo repository.SmsFeedbackPendingRepository, delayHours int)
-	// SetIvrSmsLinkRepo wires in the IvrSmsLinkRepository (called post-construction).
-	SetIvrSmsLinkRepo(repo repository.IvrSmsLinkRepository)
 	// SetConfig wires in the app config (called post-construction).
 	SetConfig(cfg *config.Config)
 
@@ -176,37 +164,31 @@ type IncidentService interface {
 	UpdateClosedIncidentSummary(ctx context.Context, incidentID uuid.UUID, userID uuid.UUID, newDescription string, reason string) (*models.IncidentResponse, error)
 
 	// Auto-assign monitor
-	AutoAssignUnassigned(ctx context.Context) error
 }
 
 type incidentService struct {
-	incidentRepo            repository.IncidentRepository
-	incidentMergeRepo       repository.IncidentMergeRepository
-	workflowRepo            repository.WorkflowRepository
-	workflowService         WorkflowService
-	userRepo                repository.UserRepository
-	deptRepo                repository.DepartmentRepository
-	rejectionLogRepo        repository.RejectionLogRepository
-	classificationRepo      repository.ClassificationRepository
-	locationRepo            repository.LocationRepository
-	roleRepo                repository.RoleRepository
-	storage                 *storage.MinIOStorage
-	db                      *gorm.DB
-	wsHub                   *WSHub
-	readyToCloseService     ReadyToCloseService
-	notificationService     *NotificationService
-	userService             UserService
-	fcmService              *FCMService
-	integrationExecutor     IntegrationExecutor
-	momraStatusSyncService  MOMRAStatusSyncService
-	actionExecutor          ActionExecutor
-	publicFeedbackRepo      repository.IncidentPublicFeedbackRepository
-	smsFeedbackPendingRepo  repository.SmsFeedbackPendingRepository
-	smsFeedbackDelayMinutes int
-	ivrSmsLinkRepo          repository.IvrSmsLinkRepository
-	rrCounters              map[string]int64
-	rrMu                    sync.Mutex
-	cfg                     *config.Config
+	incidentRepo        repository.IncidentRepository
+	incidentMergeRepo   repository.IncidentMergeRepository
+	workflowRepo        repository.WorkflowRepository
+	workflowService     WorkflowService
+	userRepo            repository.UserRepository
+	deptRepo            repository.DepartmentRepository
+	rejectionLogRepo    repository.RejectionLogRepository
+	classificationRepo  repository.ClassificationRepository
+	locationRepo        repository.LocationRepository
+	roleRepo            repository.RoleRepository
+	storage             *storage.MinIOStorage
+	db                  *gorm.DB
+	wsHub               *WSHub
+	readyToCloseService ReadyToCloseService
+	notificationService *NotificationService
+	userService         UserService
+	fcmService          *FCMService
+	integrationExecutor IntegrationExecutor
+	actionExecutor      ActionExecutor
+	rrCounters          map[string]int64
+	rrMu                sync.Mutex
+	cfg                 *config.Config
 }
 
 func NewIncidentService(
@@ -263,19 +245,9 @@ func (s *incidentService) SetConfig(cfg *config.Config) {
 	s.cfg = cfg
 }
 
-// SetIvrSmsLinkRepo wires the IvrSmsLinkRepository into the incident service.
-func (s *incidentService) SetIvrSmsLinkRepo(repo repository.IvrSmsLinkRepository) {
-	s.ivrSmsLinkRepo = repo
-}
-
 // SetFCMService wires the FCMService into the incident service.
 func (s *incidentService) SetFCMService(fcm *FCMService) {
 	s.fcmService = fcm
-}
-
-// SetMOMRAStatusSyncService wires the MOMRA outbound status sync into the incident service.
-func (s *incidentService) SetMOMRAStatusSyncService(svc MOMRAStatusSyncService) {
-	s.momraStatusSyncService = svc
 }
 
 // SetIntegrationExecutor wires the IntegrationExecutor into the incident service.
@@ -285,15 +257,6 @@ func (s *incidentService) SetIntegrationExecutor(exec IntegrationExecutor) {
 
 func (s *incidentService) SetActionExecutor(ae ActionExecutor) {
 	s.actionExecutor = ae
-}
-
-func (s *incidentService) SetPublicFeedbackRepo(repo repository.IncidentPublicFeedbackRepository) {
-	s.publicFeedbackRepo = repo
-}
-
-func (s *incidentService) SetSmsFeedbackPendingRepo(repo repository.SmsFeedbackPendingRepository, delayMinutes int) {
-	s.smsFeedbackPendingRepo = repo
-	s.smsFeedbackDelayMinutes = delayMinutes
 }
 
 // convertibleStateCode returns the workflow state code an incident must be in
@@ -404,32 +367,19 @@ func roundRobinPoolKey(roleIDs []uuid.UUID) string {
 	return hex.EncodeToString(hash[:])
 }
 
-// getNextRoundRobinAssignee picks the next agent from the online eligible pool using round-robin.
+// getNextRoundRobinAssignee picks the next agent from the eligible pool using round-robin.
 func (s *incidentService) getNextRoundRobinAssignee(ctx context.Context, roleIDs []uuid.UUID, classificationID, locationID, departmentID *uuid.UUID) (*uuid.UUID, error) {
 	var users []models.User
-	if os.Getenv("CALLING_ENABLED") == "true" {
-		// For EPM940, use a different logic for finding online agents
-		onlineUsers, err := s.userRepo.FindMatchingOnline(ctx, roleIDs, classificationID, locationID, departmentID, nil)
-		if err != nil {
-			return nil, fmt.Errorf("find online agents: %w", err)
-		}
-		if len(onlineUsers) == 0 {
-			return nil, fmt.Errorf("%s", i18n.T(ctx, "no_online_agents"))
-		}
-
-		users = onlineUsers
-	} else {
-		// For other clients, use the default logic
-		offlineUsers, err := s.userRepo.FindMatching(ctx, roleIDs, classificationID, locationID, departmentID, nil)
-		if err != nil {
-			return nil, fmt.Errorf("find agents: %w", err)
-		}
-
-		if len(offlineUsers) == 0 {
-			return nil, fmt.Errorf("%s", i18n.T(ctx, "no_agents"))
-		}
-		users = offlineUsers
+	// For other clients, use the default logic
+	offlineUsers, err := s.userRepo.FindMatching(ctx, roleIDs, classificationID, locationID, departmentID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("find agents: %w", err)
 	}
+
+	if len(offlineUsers) == 0 {
+		return nil, fmt.Errorf("%s", i18n.T(ctx, "no_agents"))
+	}
+	users = offlineUsers
 
 	sort.Slice(users, func(i, j int) bool {
 		return users[i].ID.String() < users[j].ID.String()
@@ -481,19 +431,6 @@ func workflowRequiredFieldSet(workflow *models.Workflow) map[string]bool {
 		}
 	}
 	return required
-}
-
-// validateIncidentFormRequiredFields enforces workflow-required rules for caller/cooperation fields only.
-func validateIncidentFormRequiredFields(ctx context.Context, workflow *models.Workflow, callerIdentity, cooperationStatus string) IncidentFieldErrors {
-	required := workflowRequiredFieldSet(workflow)
-	fieldErrors := make(IncidentFieldErrors)
-	if required["caller_identity_text"] && strings.TrimSpace(callerIdentity) == "" {
-		fieldErrors["caller_identity_text"] = i18n.T(ctx, "caller_identity_required")
-	}
-	if required["cooperation_status"] && strings.TrimSpace(cooperationStatus) == "" {
-		fieldErrors["cooperation_status"] = i18n.T(ctx, "cooperation_status_required")
-	}
-	return fieldErrors
 }
 
 func (s *incidentService) CreateIncident(ctx context.Context, req *models.IncidentCreateRequest, reporterID uuid.UUID) (*models.IncidentResponse, error) {
@@ -596,28 +533,6 @@ func (s *incidentService) CreateIncident(ctx context.Context, req *models.Incide
 		if strings.EqualFold(req.Source, skip) {
 			sourceSkipped = true
 			break
-		}
-	}
-
-	// Extract lat/lng from gis_location when not provided explicitly
-	if req.Latitude == nil && req.Longitude == nil && len(req.GisLocation) > 0 {
-		var gis struct {
-			Data struct {
-				GeoJson struct {
-					DrawedPoint struct {
-						Coordinates []float64 `json:"coordinates"`
-					} `json:"drawedPoint"`
-				} `json:"geoJson"`
-			} `json:"data"`
-		}
-		if err := json.Unmarshal(req.GisLocation, &gis); err == nil {
-			coords := gis.Data.GeoJson.DrawedPoint.Coordinates
-			if len(coords) >= 2 {
-				lng := coords[0]
-				lat := coords[1]
-				req.Latitude = &lat
-				req.Longitude = &lng
-			}
 		}
 	}
 
@@ -729,15 +644,6 @@ func (s *incidentService) CreateIncident(ctx context.Context, req *models.Incide
 		return nil, errors.New(i18n.T(ctx, "invalid_workflow_id_lower"))
 	}
 
-	// Enforce workflow-required caller/cooperation fields.
-	workflow, wfErr := s.workflowRepo.FindByID(ctx, workflowID)
-	if wfErr != nil {
-		return nil, wfErr
-	}
-	if fieldErrors := validateIncidentFormRequiredFields(ctx, workflow, req.CallerIdentityText, req.CooperationStatus); len(fieldErrors) > 0 {
-		return nil, fieldErrors
-	}
-
 	// Get the initial state of the workflow
 	initialState, err := s.workflowRepo.GetInitialState(ctx, workflowID)
 	if err != nil {
@@ -790,27 +696,23 @@ func (s *incidentService) CreateIncident(ctx context.Context, req *models.Incide
 	}
 
 	incident := &models.Incident{
-		IncidentNumber:     incidentNumber,
-		Title:              req.Title,
-		Description:        req.Description,
-		WorkflowID:         workflowID,
-		CurrentStateID:     initialState.ID,
-		ReporterID:         &reporterID,
-		CreatedByID:        &creatorID,
-		CallerIdentity:     req.CallerIdentity,
-		CallerIdentityText: strings.TrimSpace(req.CallerIdentityText),
-		CooperationStatus:  req.CooperationStatus,
-		CustomFields:       customFieldsJSON,
-		GisLocation:        datatypes.JSON(req.GisLocation),
-		Latitude:           req.Latitude,
-		Longitude:          req.Longitude,
-		Address:            req.Address,
-		City:               req.City,
-		State:              req.State,
-		Country:            req.Country,
-		PostalCode:         req.PostalCode,
-		RecordType:         recordType,
-		Source:             req.Source,
+		IncidentNumber: incidentNumber,
+		Title:          req.Title,
+		Description:    req.Description,
+		WorkflowID:     workflowID,
+		CurrentStateID: initialState.ID,
+		ReporterID:     &reporterID,
+		CreatedByID:    &creatorID,
+		CustomFields:   customFieldsJSON,
+		Latitude:       req.Latitude,
+		Longitude:      req.Longitude,
+		Address:        req.Address,
+		City:           req.City,
+		State:          req.State,
+		Country:        req.Country,
+		PostalCode:     req.PostalCode,
+		RecordType:     recordType,
+		Source:         req.Source,
 	}
 
 	if !strings.EqualFold(s.cfg.ClientCode, constants.CLIENT_CODE.EPM940) {
@@ -986,51 +888,6 @@ func (s *incidentService) CreateIncident(ctx context.Context, req *models.Incide
 			"incident":            resp,
 			"transition_role_ids": transitionRoleIDs, // empty slice = all users can see it
 		})
-	}
-
-	// IvrInstSms := strings.TrimSpace(os.Getenv("IVR_INST_SMS"))
-	if strings.EqualFold(req.Source, constants.INCIDENT_SOURCE.IVR) &&
-		strings.EqualFold(clientCode, constants.CLIENT_CODE.EPM940) {
-
-		// const ivrSmsDuration = 24 * time.Hour
-		// rawToken := pkgutils.GenerateIncidentToken(incident.ID.String(), ivrSmsDuration)
-		// smsLink := pkgutils.BuildSMSLinkFromToken(ctx, incident.ID.String(), rawToken)
-		// log.Printf("Generated IVR SMS link for incident %s", incident.ID)
-
-		// // Track link so old links can be invalidated and submission state can be detected.
-		// if s.ivrSmsLinkRepo != nil {
-		// 	_ = s.ivrSmsLinkRepo.DeactivateAllForIncident(ctx, incident.ID)
-		// 	_ = s.ivrSmsLinkRepo.Create(ctx, &models.IvrSmsLink{
-		// 		IncidentID: incident.ID,
-		// 		TokenHash:  pkgutils.HashToken(rawToken),
-		// 		SentAt:     time.Now(),
-		// 		ExpiresAt:  time.Now().Add(ivrSmsDuration),
-		// 		IsActive:   true,
-		// 	})
-		// }
-
-		var sent []string
-		if req.ReporterPhone == "" {
-			log.Printf("[IncidentService] No reporter phone for IVR incident %s, skipping SMS", incident.ID)
-		}
-		if req.ReporterPhone != "" {
-			err := s.notificationService.SendSMSTemplate(
-				ctx, "IVR_INCIDENT_CREATED_SMS", SMSLanguageFromContext(ctx), req.ReporterPhone,
-				BuildIncidentVariables(incident, nil, nil),
-				&reporterID, &incident.ID,
-			)
-			if err != nil {
-				log.Printf("[IncidentService] IVR SMS failed for incident %s to %s: %v", incident.IncidentNumber, maskMobile(req.ReporterPhone), err)
-			} else {
-				sent = append(sent, "SMS")
-			}
-		}
-		log.Printf("IVR incident created with ID %s, SMS sent: %v", incident.ID, sent)
-		// log.Println("ivr sms link send: ", smsLink)
-
-		// Log revision so agents can see when the initial SMS was sent.
-		_ = s.CreateRevision(ctx, incident.ID, models.RevisionActionIVRSmsSent,
-			"IVR SMS sent to citizen on incident creation", "تم إرسال رسالة SMS صوتية إلى المواطن عند إنشاء الحادث", nil, reporterID)
 	}
 
 	// Send template-based email/SMS notifications for the initial state (if configured)
@@ -1236,123 +1093,8 @@ func (s *incidentService) ListIncidents(ctx context.Context, filter *models.Inci
 	if strings.EqualFold(clientCode, constants.CLIENT_CODE.VD2) {
 		s.stampRecurrences(ctx, filter, incidents, responses)
 	}
-	// For EPM940: enrich IVR incidents with SMS link submission state.
-	// Collect IVR incident IDs, do a single batch lookup, then stamp each response.
-	if strings.EqualFold(clientCode, constants.CLIENT_CODE.EPM940) && s.ivrSmsLinkRepo != nil {
-		var ivrIDs []uuid.UUID
-		ivrIdx := make(map[uuid.UUID]int, len(incidents))
-		for i, inc := range incidents {
-			if strings.EqualFold(inc.Source, constants.INCIDENT_SOURCE.IVR) {
-				ivrIDs = append(ivrIDs, inc.ID)
-				ivrIdx[inc.ID] = i
-			}
-		}
-		if len(ivrIDs) > 0 {
-			submittedLinks, err := s.ivrSmsLinkRepo.FindSubmittedByIncidentIDs(ctx, ivrIDs)
-			if err == nil {
-				for incID, idx := range ivrIdx {
-					if link, ok := submittedLinks[incID]; ok {
-						responses[idx].IvrSubmitted = true
-						responses[idx].IvrSubmittedAt = link.SubmittedAt
-					}
-				}
-			}
-		}
-	}
 
 	return responses, total, nil
-}
-
-// momraEEListEntry mirrors epm_incident_handler.go's EPMExternalEntity JSON shape
-// (EntityID/EECode/EEName) for unmarshaling Incident.AvailableEEList (a jsonb column,
-// see models/incident.go). Duplicated here rather than imported since this services
-// package doesn't depend on the handlers package.
-type momraEEListEntry struct {
-	EntityID string `json:"EntityID"`
-	EECode   string `json:"EECode"`
-	EEName   string `json:"EEName"`
-}
-
-// resolveIncidentEEDepartmentIDs resolves the set of Department IDs that MOMRA
-// declared eligible for THIS specific incident at submission time
-// (Incident.AvailableEEList — see epm_incident_handler.go's EEList/EPMExternalEntity
-// handling). This is narrower than the classification-wide EE-classification links
-// (deptRepo.FindMatching): MOMRA may name fewer EEs eligible for a given incident than
-// are generally linked to its special classification, so this incident-specific list
-// is the authoritative source for validateExternalDepartmentAssignment. Entries are
-// resolved the same way epm_incident_handler.go's resolveEERoutingDepartmentByCodeOrName
-// does: EntityID/EECode first (the stable key synced from MOMRA's EE master into
-// Department.Code), EEName as a fallback.
-func (s *incidentService) resolveIncidentEEDepartmentIDs(ctx context.Context, incident *models.Incident) map[uuid.UUID]bool {
-	allowed := map[uuid.UUID]bool{}
-	for _, d := range s.resolveIncidentEEDepartments(ctx, incident) {
-		allowed[d.ID] = true
-	}
-	return allowed
-}
-
-// resolveIncidentEEDepartments is the full-record counterpart of
-// resolveIncidentEEDepartmentIDs: same resolution (EntityID/EECode first, EEName
-// fallback), but returns the actual Department records rather than just a
-// membership set. Used by ExecuteTransition's auto-detect block below to merge these
-// incident-specific EEs into the classification/location-matched candidate list —
-// mirrors department_handler.go's MatchDepartment, which the frontend's picker uses,
-// so both stay in agreement about which departments are actually selectable.
-func (s *incidentService) resolveIncidentEEDepartments(ctx context.Context, incident *models.Incident) []models.Department {
-	if len(incident.AvailableEEList) == 0 {
-		return nil
-	}
-	var entries []momraEEListEntry
-	if err := json.Unmarshal(incident.AvailableEEList, &entries); err != nil {
-		return nil
-	}
-	var result []models.Department
-	seen := make(map[uuid.UUID]bool, len(entries))
-	for _, e := range entries {
-		var dept *models.Department
-		code := strings.TrimSpace(e.EntityID)
-		if code == "" {
-			code = strings.TrimSpace(e.EECode)
-		}
-		if code != "" {
-			if d, err := s.deptRepo.FindByCode(ctx, code); err == nil {
-				dept = d
-			}
-		}
-		if dept == nil && strings.TrimSpace(e.EEName) != "" {
-			if d, err := s.deptRepo.FindByNameOrNameAr(ctx, e.EEName, e.EEName); err == nil {
-				dept = d
-			}
-		}
-		if dept != nil && dept.Type == externalEntityDepartmentType && dept.IsActive && !seen[dept.ID] {
-			seen[dept.ID] = true
-			result = append(result, *dept)
-		}
-	}
-	return result
-}
-
-// validateExternalDepartmentAssignment enforces that, for an incident originally
-// submitted by MOMRA (Source == "MOMRA"), assigning an external-type department only
-// succeeds if that department is one of the External Entities MOMRA declared eligible
-// for this specific incident at submission time (see resolveIncidentEEDepartmentIDs).
-// Internal-type departments and non-MOMRA incidents are unrestricted — this rule only
-// protects MOMRA-sourced external-entity assignment.
-func (s *incidentService) validateExternalDepartmentAssignment(ctx context.Context, incident *models.Incident, departmentID uuid.UUID) error {
-	if incident.Source != "MOMRA" {
-		return nil
-	}
-	dept, err := s.deptRepo.FindByID(ctx, departmentID)
-	if err != nil {
-		return fmt.Errorf("department not found: %w", err)
-	}
-	if dept.Type != externalEntityDepartmentType {
-		return nil
-	}
-	if !s.resolveIncidentEEDepartmentIDs(ctx, incident)[departmentID] {
-		return fmt.Errorf("external entity %s is not in this incident's MOMRA-provided EE list", dept.Name)
-	}
-	return nil
 }
 
 func (s *incidentService) UpdateIncident(ctx context.Context, id uuid.UUID, req *models.IncidentUpdateRequest, userID uuid.UUID, userRoleIDs []uuid.UUID) (*models.IncidentResponse, error) {
@@ -1423,27 +1165,6 @@ func (s *incidentService) UpdateIncident(ctx context.Context, id uuid.UUID, req 
 		if req.Source == "" || req.Source != constants.INCIDENT_SOURCE.IVR || incident.Comments == nil {
 			tx.Rollback()
 			return nil, errors.New(i18n.T(ctx, "source_required_ivr"))
-		}
-	}
-
-	// Enforce workflow-required caller/cooperation fields when explicitly updated.
-	if req.CallerIdentityText != nil || req.CooperationStatus != nil {
-		effectiveCallerIdentity := incident.CallerIdentityText
-		effectiveCooperationStatus := incident.CooperationStatus
-		if req.CallerIdentityText != nil {
-			effectiveCallerIdentity = strings.TrimSpace(*req.CallerIdentityText)
-		}
-		if req.CooperationStatus != nil {
-			effectiveCooperationStatus = strings.TrimSpace(*req.CooperationStatus)
-		}
-		workflow, wfErr := s.workflowRepo.FindByID(ctx, incident.WorkflowID)
-		if wfErr != nil {
-			tx.Rollback()
-			return nil, wfErr
-		}
-		if fieldErrors := validateIncidentFormRequiredFields(ctx, workflow, effectiveCallerIdentity, effectiveCooperationStatus); len(fieldErrors) > 0 {
-			tx.Rollback()
-			return nil, fieldErrors
 		}
 	}
 
@@ -1560,14 +1281,6 @@ func (s *incidentService) UpdateIncident(ctx context.Context, id uuid.UUID, req 
 		}
 	}
 
-	if len(req.GisLocation) > 0 {
-		incident.GisLocation = datatypes.JSON(req.GisLocation)
-		changes = append(changes, models.IncidentFieldChange{
-			FieldName:  "gis_location",
-			FieldLabel: "GIS Location",
-		})
-	}
-
 	if len(req.ReporterEmail) > 0 {
 		incident.ReporterEmail = req.ReporterEmail
 		changes = append(changes, models.IncidentFieldChange{
@@ -1590,46 +1303,6 @@ func (s *incidentService) UpdateIncident(ctx context.Context, id uuid.UUID, req 
 			FieldName:  "reporter_name",
 			FieldLabel: "Reporter Name",
 		})
-	}
-
-	// Apply provided caller/cooperation updates (including clears).
-	if req.CallerIdentityText != nil {
-		newCallerIdentity := strings.TrimSpace(*req.CallerIdentityText)
-		if newCallerIdentity != incident.CallerIdentityText {
-			oldValue := incident.CallerIdentityText
-			newValue := newCallerIdentity
-			changes = append(changes, models.IncidentFieldChange{
-				FieldName:  "caller_identity_text",
-				FieldLabel: "Caller Identity",
-				OldValue:   &oldValue,
-				NewValue:   &newValue,
-			})
-			// Omit value from description; old/new are recorded in Changes.
-			descriptions = append(descriptions, "Caller Identity changed")
-			incident.CallerIdentityText = newValue
-		}
-	}
-
-	if req.CooperationStatus != nil {
-		newCooperationStatus := strings.TrimSpace(*req.CooperationStatus)
-		if newCooperationStatus != incident.CooperationStatus {
-			oldValue := incident.CooperationStatus
-			newValue := newCooperationStatus
-			changes = append(changes, models.IncidentFieldChange{
-				FieldName:  "cooperation_status",
-				FieldLabel: "Cooperation Status",
-				OldValue:   &oldValue,
-				NewValue:   &newValue,
-			})
-			if oldValue == "" {
-				descriptions = append(descriptions, fmt.Sprintf("Cooperation Status set to %s", newValue))
-			} else if newValue == "" {
-				descriptions = append(descriptions, fmt.Sprintf("Cooperation Status cleared (was %s)", oldValue))
-			} else {
-				descriptions = append(descriptions, fmt.Sprintf("Cooperation Status changed from %s to %s", oldValue, newValue))
-			}
-			incident.CooperationStatus = newValue
-		}
 	}
 
 	// Parse optional UUIDs
@@ -1731,10 +1404,6 @@ func (s *incidentService) UpdateIncident(ctx context.Context, id uuid.UUID, req 
 		} else {
 			deptID, err := uuid.Parse(*req.DepartmentID)
 			if err == nil {
-				if err := s.validateExternalDepartmentAssignment(ctx, incident, deptID); err != nil {
-					tx.Rollback()
-					return nil, err
-				}
 				if incident.DepartmentID == nil || *incident.DepartmentID != deptID {
 					newVal := *req.DepartmentID
 					changes = append(changes, models.IncidentFieldChange{
@@ -1909,12 +1578,6 @@ func (s *incidentService) UpdateIncident(ctx context.Context, id uuid.UUID, req 
 	if req.ReporterName != "" {
 		updates["reporter_name"] = incident.ReporterName
 	}
-	if req.CallerIdentityText != nil {
-		updates["caller_identity_text"] = incident.CallerIdentityText
-	}
-	if req.CooperationStatus != nil {
-		updates["cooperation_status"] = incident.CooperationStatus
-	}
 
 	if req.Latitude != nil {
 		updates["latitude"] = *req.Latitude
@@ -1944,9 +1607,6 @@ func (s *incidentService) UpdateIncident(ctx context.Context, id uuid.UUID, req 
 	}
 	if incident.CustomFields != "" {
 		updates["custom_fields"] = incident.CustomFields
-	}
-	if len(incident.GisLocation) > 0 {
-		updates["gis_location"] = incident.GisLocation
 	}
 	// Persist recalculated SLA deadline when lookup values were updated
 	if req.LookupValueIDs != nil && incident.SLADeadline != nil {
@@ -2040,33 +1700,6 @@ func (s *incidentService) UpdateIncident(ctx context.Context, id uuid.UUID, req 
 
 	if len(updated.Assignees) == 0 {
 		log.Printf("No Assignees found for incident Number %s incident no. %s", incident.IncidentNumber, incident.ID.String())
-	}
-
-	// Mark SMS link as submitted whenever the citizen forwards their ivr_link_token.
-	// This runs regardless of the source field — the token presence is the definitive signal.
-	if req.IvrLinkToken != "" && s.ivrSmsLinkRepo != nil {
-		var linkID uuid.UUID
-		tokenHash := pkgutils.HashToken(req.IvrLinkToken)
-		log.Printf("[IVR] looking up link by token hash %s for incident %s", tokenHash, id)
-		if link, err := s.ivrSmsLinkRepo.FindByTokenHash(ctx, tokenHash, id); err == nil && link != nil {
-			linkID = link.ID
-		} else {
-			log.Printf("[IVR] token hash lookup failed (%v), falling back to latest active link", err)
-			if link, err := s.ivrSmsLinkRepo.FindLatestActiveByIncidentID(ctx, id); err == nil && link != nil {
-				linkID = link.ID
-			}
-		}
-		if linkID != uuid.Nil {
-			if err := s.ivrSmsLinkRepo.MarkSubmitted(ctx, linkID, updated.ReporterPhone); err != nil {
-				log.Printf("[IVR] MarkSubmitted failed for link %s: %v", linkID, err)
-			} else {
-				log.Printf("[IVR] link %s marked as submitted for incident %s", linkID, id)
-			}
-		} else {
-			log.Printf("[IVR] no active link found to mark as submitted for incident %s", id)
-		}
-		_ = s.CreateRevision(ctx, id, models.RevisionActionIVRSmsSubmitted,
-			"Citizen submitted additional information via IVR SMS link", "قدم المواطن معلومات إضافية عبر رابط الرسائل القصيرة الصوتية", changes, userID)
 	}
 
 	// Send in-app notification and revision for IVR updates from EPM940.
@@ -3332,28 +2965,6 @@ func stringPtr(s string) *string {
 
 // State transitions
 
-// momraTransitionAttachments resolves the attachments added on a transition
-// into UpdateStatusV2 Attachments. AttachmentURL is the backend-relative path
-// /Momra/API/EPM/Attachments/{id} — MOMRA prefixes Automax's backend host and
-// downloads it with its EPM Bearer token (MinIO isn't reachable from outside).
-// The path is keyed on the permanent attachment ID, so it never expires.
-// Attachments that can't be resolved are skipped rather than failing the sync.
-func (s *incidentService) momraTransitionAttachments(ctx context.Context, attachmentIDs []string) []MOMRAStatusAttachment {
-	var out []MOMRAStatusAttachment
-	for _, idStr := range attachmentIDs {
-		id, err := uuid.Parse(idStr)
-		if err != nil {
-			continue
-		}
-		attachment, err := s.incidentRepo.FindAttachmentByID(ctx, id)
-		if err != nil || attachment == nil {
-			continue
-		}
-		out = append(out, toMOMRAStatusAttachment(attachment))
-	}
-	return out
-}
-
 func (s *incidentService) ExecuteTransition(ctx context.Context, incidentID uuid.UUID, req *models.IncidentTransitionRequest, userID uuid.UUID, userRoleIDs []uuid.UUID) (*models.IncidentResponse, error) {
 	// Begin transaction
 	tx := s.db.Begin()
@@ -3622,36 +3233,6 @@ func (s *incidentService) ExecuteTransition(ctx context.Context, incidentID uuid
 		}
 		matchedDepts, _ := s.deptRepo.FindMatching(ctx, classID, locID, deptTypeFilter)
 
-		// For a MOMRA-sourced incident, auto-detect candidates must include this
-		// incident's own EEList-resolved departments (Incident.AvailableEEList), not
-		// just classification/location linkage — MOMRA can declare an EE eligible for
-		// a specific incident with no general classification link at all. Without
-		// this merge, a classification-linked EE and an EEList-only EE would produce
-		// len(matchedDepts)==1 (only the classification-linked one visible here),
-		// causing the "single match — auto-assign" branch below to silently override
-		// whatever the user actually selected in the frontend picker — which already
-		// shows both, since department_handler.go's MatchDepartment does this same
-		// merge. Kept in sync with that handler rather than sharing code directly,
-		// since handlers and services don't depend on each other.
-		wantsExternalMatch := deptTypeFilter == nil || *deptTypeFilter == externalEntityDepartmentType
-		if incident.Source == "MOMRA" && wantsExternalMatch && len(incident.AvailableEEList) > 0 {
-			eeDepartments := s.resolveIncidentEEDepartments(ctx, incident)
-			merged := make([]models.Department, 0, len(matchedDepts)+len(eeDepartments))
-			for _, d := range matchedDepts {
-				if d.Type != externalEntityDepartmentType {
-					merged = append(merged, d)
-				}
-			}
-			seen := make(map[uuid.UUID]bool, len(eeDepartments))
-			for _, d := range eeDepartments {
-				if !seen[d.ID] {
-					seen[d.ID] = true
-					merged = append(merged, d)
-				}
-			}
-			matchedDepts = merged
-		}
-
 		if len(matchedDepts) == 1 {
 			// Single match — auto-assign
 			updates["department_id"] = matchedDepts[0].ID
@@ -3680,18 +3261,6 @@ func (s *incidentService) ExecuteTransition(ctx context.Context, incidentID uuid
 			updates["department_id"] = deptID
 		}
 		// If no departments match, keep current department (graceful fallback)
-	}
-
-	// For a MOMRA-sourced incident, an external-type department assigned here (from
-	// any of the three branches above) must be one of the External Entities MOMRA
-	// declared eligible for THIS specific incident at submission time — see
-	// validateExternalDepartmentAssignment. Checked once here rather than in each
-	// branch since all three write the same "department_id" key into updates.
-	if deptID, ok := updates["department_id"].(uuid.UUID); ok {
-		if err := s.validateExternalDepartmentAssignment(ctx, incident, deptID); err != nil {
-			tx.Rollback()
-			return nil, err
-		}
 	}
 
 	// Handle user assignment from transition settings
@@ -3798,8 +3367,6 @@ func (s *incidentService) ExecuteTransition(ctx context.Context, incidentID uuid
 		updates["closed_at"] = now
 	} else {
 		// Left (or never in) a terminal state: a future closure must send a fresh report link.
-		updates["report_link_sms_sent_at"] = nil
-		updates["report_link_email_sent_at"] = nil
 	}
 
 	// Apply user-provided field changes configured on the transition
@@ -3816,10 +3383,6 @@ func (s *incidentService) ExecuteTransition(ctx context.Context, incidentID uuid
 				}
 			case "department_id":
 				if id, err := uuid.Parse(fieldValue); err == nil {
-					if err := s.validateExternalDepartmentAssignment(ctx, incident, id); err != nil {
-						tx.Rollback()
-						return nil, err
-					}
 					updates["department_id"] = id
 				}
 			case "location_id":
@@ -3923,61 +3486,6 @@ func (s *incidentService) ExecuteTransition(ctx context.Context, incidentID uuid
 		}
 	}
 
-	// If the destination state is an AI-QA state, reset so the monitor re-triggers:
-	// - is_ai_verified = false on the incident (monitor only picks up false)
-	// - is_reopened = false on the feedback record (button shows "Reopen" again)
-	// The feedback record itself is kept so the incident stays visible in the QA list.
-	// The monitor's Create uses upsert, so it overwrites the stale audit data in place.
-	// If the destination state is an AI-QA state, reset so the monitor re-triggers:
-	// - is_ai_verified = false on the incident (monitor only picks up false)
-	// - clear stale QA result fields so the UI shows the ticket is pending re-evaluation
-	// - is_reopened = false so the "Reopen" button reappears after re-evaluation
-	// raw_response is intentionally preserved until the new evaluation overwrites it.
-	// The feedback record itself is kept so the incident stays visible in the QA list.
-	if newState.IsAIQA {
-		var existingFeedback models.AIQualityFeedback
-		var setIsReopened bool
-		err := tx.WithContext(ctx).
-			Where("incident_id = ?", incidentID).
-			First(&existingFeedback).Error
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			fmt.Printf("Warning: failed to query existing AI quality feedback: %v\n", err)
-		}
-		if existingFeedback.ID != uuid.Nil {
-			setIsReopened = true
-		}
-
-		if err := tx.WithContext(ctx).
-			Model(&models.Incident{}).
-			Where("id = ?", incidentID).
-			Update("is_ai_verified", false).Error; err != nil {
-			fmt.Printf("Warning: failed to reset is_ai_verified for AI-QA state: %v\n", err)
-		}
-		if err := tx.WithContext(ctx).
-			Model(&models.AIQualityFeedback{}).
-			Where("incident_id = ?", incidentID).
-			Updates(map[string]interface{}{
-				"is_reopened":       setIsReopened, // Only set to true if there was an existing feedback record (i.e. this is not the first time entering an AI-QA state)
-				"changed_summary":   "",
-				"resolution_status": "",
-				"distance_meters":   0,
-			}).Error; err != nil {
-			fmt.Printf("Warning: failed to reset ai_quality_feedback fields for AI-QA state: %v\n", err)
-		}
-	}
-
-	// If this is a reopen transition and the incident has an AI quality feedback record,
-	// mark it as reopened so the QA page reflects the action regardless of which
-	// surface (incident details or QA page) triggered the reopen.
-	if transition.IsReopen {
-		if err := tx.WithContext(ctx).
-			Model(&models.AIQualityFeedback{}).
-			Where("incident_id = ?", incidentID).
-			Update("is_reopened", true).Error; err != nil {
-			fmt.Printf("Warning: failed to set is_reopened on reopen transition: %v\n", err)
-		}
-	}
-
 	// Create revision for state change (using txRepo to stay within the transaction)
 	oldStateName := transition.FromState.Name
 	newStateName := newState.Name
@@ -4078,24 +3586,6 @@ func (s *incidentService) ExecuteTransition(ctx context.Context, incidentID uuid
 			// State-exit triggers on the source state
 			s.integrationExecutor.RunStateTriggers(ctx, updatedForExec, transition.FromStateID, transition.FromState.Name, "exit")
 
-			// MOMRA outbound status sync (docs/MOMRA_Outbound_Integration_Spec_v1.0.md
-			// §3 Story B) — async so an outbound MOMRA call/retry never adds latency to
-			// this request. No-ops internally if no mapping exists for the new state.
-			// operatorName/operatorID/eeNotesFromMUN (TFIS v1.0 §11.3) are resolved
-			// synchronously here — before the goroutine, which uses context.Background()
-			// and so can't read the request-scoped ctx/req itself — then closed over.
-			if s.momraStatusSyncService != nil {
-				input := MOMRAStatusSyncInput{Comment: strings.TrimSpace(req.Comment)}
-				if actor, actorErr := s.userRepo.FindByID(ctx, userID); actorErr == nil && actor != nil {
-					input.OperatorName = strings.TrimSpace(actor.FirstName + " " + actor.LastName)
-					if input.OperatorName == "" {
-						input.OperatorName = actor.Username
-					}
-					input.OperatorID = actor.Username
-				}
-				input.Attachments = s.momraTransitionAttachments(ctx, req.Attachments)
-				go s.momraStatusSyncService.SyncIncidentStatus(context.Background(), updatedForExec, transition.ToStateID, input)
-			}
 		}
 	}
 
@@ -4387,46 +3877,6 @@ func (s *incidentService) ExecuteTransition(ctx context.Context, incidentID uuid
 	updated.PreviousAssigneeIDs = preTxAssigneeIDs
 	log.Printf("[ExecuteTransition] incident=%s transition=%s — PreviousAssigneeIDs(%d) CurrentAssigneeID=%v",
 		incident.IncidentNumber, transition.Name, len(preTxAssigneeIDs), updated.AssigneeID)
-
-	// IsFinalClose: pre-create a pending feedback record so BuildIncidentVariables can call
-	// GenerateFeedbackToken with a real feedbackID, producing a direct submit URL in {{feedback_url}}.
-	// Also schedule the SMS fallback via SmsFeedbackPending — the SMS is NOT sent immediately;
-	// the SLA monitor will send it only if the WhatsApp chatbot receives no response within the delay window.
-	if transition.IsFinalClose && s.publicFeedbackRepo != nil {
-		mobileNo := updated.ReporterPhone
-		if mobileNo == "" && updated.Reporter != nil {
-			mobileNo = updated.Reporter.Phone
-		}
-		f := &models.IncidentPublicFeedback{
-			IncidentID: incidentID,
-			MobileNo:   mobileNo,
-			Source:     "sms",
-			CreatedBy:  userID,
-		}
-		if err := s.publicFeedbackRepo.Create(ctx, f); err == nil {
-			updated.FeedbackID = &f.ID
-			// Schedule delayed SMS fallback.
-			if s.smsFeedbackPendingRepo != nil {
-				delayMinutes := s.smsFeedbackDelayMinutes
-				closedAt := time.Now()
-				pending := &models.SmsFeedbackPending{
-					IncidentID:  incidentID,
-					FeedbackID:  f.ID,
-					MobileNo:    mobileNo,
-					ClosedAt:    closedAt,
-					ScheduledAt: closedAt.Add(time.Duration(delayMinutes) * time.Minute),
-				}
-				if err := s.smsFeedbackPendingRepo.Create(ctx, pending); err != nil {
-					log.Printf("[SmsFeedback] failed to create pending SMS record for incident %s: %v", incidentID, err)
-				} else {
-					log.Printf("[SmsFeedback] incident=%s — SMS fallback scheduled at %s (delay=%dm)",
-						incidentID, pending.ScheduledAt.Format(time.RFC3339), delayMinutes)
-				}
-			}
-		} else {
-			log.Printf("[ExecuteTransition] failed to pre-create feedback record for IsFinalClose incident %s: %v", incidentID, err)
-		}
-	}
 
 	// Execute automation actions configured on this transition.
 	// Uses the fully-preloaded incident so recipient fields (Assignee.Email, Reporter.Email, etc.) are available.
@@ -6453,116 +5903,6 @@ func (s *incidentService) SendMissingInfoClosureSMS(
 		return
 	}
 	log.Printf("[SMS] flow=missing_info: notification service unavailable — SMS not sent for incident %s", incident.IncidentNumber)
-}
-
-// AutoAssignUnassigned finds incidents in the state configured by AUTO_ASSIGN_STATE_CODE that
-// have no rows in incident_assignees, and assigns them to an online eligible agent using the
-// same logic as CreateIncident (respects DISTRIBUTE_INCIDENT_ASSIGN and workflow state rules).
-func (s *incidentService) AutoAssignUnassigned(ctx context.Context) error {
-	stateCode := strings.TrimSpace(os.Getenv("AUTO_ASSIGN_STATE_CODE"))
-	if stateCode == "" {
-		return nil
-	}
-
-	incidents, err := s.incidentRepo.FindUnassignedByStateCode(ctx, stateCode)
-	if err != nil {
-		return fmt.Errorf("auto-assign: query unassigned: %w", err)
-	}
-	if len(incidents) == 0 {
-		return nil
-	}
-
-	log.Printf("[AutoAssign] Found %d unassigned incident(s) in state %q", len(incidents), stateCode)
-
-	distributeAssign := strings.EqualFold(strings.TrimSpace(os.Getenv("DISTRIBUTE_INCIDENT_ASSIGN")), "true")
-
-	for i := range incidents {
-		incident := &incidents[i]
-		if incident.CurrentState == nil {
-			log.Printf("[AutoAssign] Skipping %s: CurrentState not loaded", incident.IncidentNumber)
-			continue
-		}
-		currentState := incident.CurrentState
-
-		var classID, locID, deptID *uuid.UUID
-		if incident.ClassificationID != nil {
-			classID = incident.ClassificationID
-		}
-		if incident.LocationID != nil {
-			locID = incident.LocationID
-		}
-		if incident.DepartmentID != nil {
-			deptID = incident.DepartmentID
-		}
-
-		var assigneeID *uuid.UUID
-
-		// @Maybe add logic source basis also
-		if distributeAssign {
-			var roleIDs []uuid.UUID
-			for _, r := range currentState.AssignmentRoles {
-				roleIDs = append(roleIDs, r.ID)
-			}
-			nextID, err := s.getNextRoundRobinAssignee(ctx, roleIDs, classID, locID, deptID)
-			if err != nil || nextID == nil {
-				log.Printf("[AutoAssign] %s: no online agents for round-robin: %v", incident.IncidentNumber, err)
-				continue
-			}
-			assigneeID = nextID
-		} else if currentState.AssignUserID != nil {
-			online, err := s.userRepo.IsUserOnline(ctx, *currentState.AssignUserID)
-			if err != nil || !online {
-				log.Printf("[AutoAssign] %s: fixed assignee offline or error: %v", incident.IncidentNumber, err)
-				continue
-			}
-			assigneeID = currentState.AssignUserID
-		} else if len(currentState.AssignmentRoles) > 0 {
-			var roleIDs []uuid.UUID
-			for _, r := range currentState.AssignmentRoles {
-				roleIDs = append(roleIDs, r.ID)
-			}
-			users, err := s.userRepo.FindMatchingOnline(ctx, roleIDs, classID, locID, deptID, nil)
-			if err != nil || len(users) == 0 {
-				log.Printf("[AutoAssign] %s: no online matching users: %v", incident.IncidentNumber, err)
-				continue
-			}
-			assigneeID = &users[0].ID
-
-			if currentState.AutoMatchUser {
-				allIDs := make([]uuid.UUID, len(users))
-				for j, u := range users {
-					allIDs[j] = u.ID
-				}
-				if err := s.incidentRepo.AssignIncident(ctx, incident.ID, *assigneeID); err != nil {
-					log.Printf("[AutoAssign] %s: AssignIncident failed: %v", incident.IncidentNumber, err)
-					LogAssignmentFailure(incident.ID, incident.IncidentNumber, err)
-					continue
-				}
-				if err := s.incidentRepo.SetAssignees(ctx, incident.ID, allIDs); err != nil {
-					log.Printf("[AutoAssign] %s: SetAssignees failed: %v", incident.IncidentNumber, err)
-				} else {
-					log.Printf("[AutoAssign] %s: assigned to %s (+%d total)", incident.IncidentNumber, assigneeID, len(allIDs))
-				}
-				continue
-			}
-		} else {
-			log.Printf("[AutoAssign] %s: no assignment rule configured on state %q", incident.IncidentNumber, currentState.Code)
-			continue
-		}
-
-		if err := s.incidentRepo.AssignIncident(ctx, incident.ID, *assigneeID); err != nil {
-			log.Printf("[AutoAssign] %s: AssignIncident failed: %v", incident.IncidentNumber, err)
-			LogAssignmentFailure(incident.ID, incident.IncidentNumber, err)
-			continue
-		}
-		if err := s.incidentRepo.SetAssignees(ctx, incident.ID, []uuid.UUID{*assigneeID}); err != nil {
-			log.Printf("[AutoAssign] %s: SetAssignees failed: %v", incident.IncidentNumber, err)
-		} else {
-			log.Printf("[AutoAssign] %s: assigned to %s", incident.IncidentNumber, assigneeID)
-		}
-	}
-
-	return nil
 }
 
 func (s *incidentService) stampCommentAndAttachmentCounts(ctx context.Context, incidents []models.Incident, responses []models.IncidentResponse) {

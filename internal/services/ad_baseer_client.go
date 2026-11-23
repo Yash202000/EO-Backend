@@ -344,3 +344,28 @@ func containsFold(list []string, want string) bool {
 	}
 	return false
 }
+
+// rawMessageText renders a JSON value that is normally null or a string as
+// plain text; "" for null/absent.
+func rawMessageText(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return ""
+	}
+	var str string
+	if err := json.Unmarshal(trimmed, &str); err == nil {
+		return strings.TrimSpace(str)
+	}
+	return string(trimmed)
+}
+
+// isNonJSONBody reports whether a response is clearly not JSON: an HTML/XML
+// content type, or a body that starts with '<'.
+func isNonJSONBody(contentType string, body []byte) bool {
+	ct := strings.ToLower(contentType)
+	if strings.Contains(ct, "html") || strings.Contains(ct, "xml") {
+		return true
+	}
+	trimmed := bytes.TrimSpace(body)
+	return len(trimmed) > 0 && trimmed[0] == '<'
+}

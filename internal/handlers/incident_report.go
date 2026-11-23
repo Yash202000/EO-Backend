@@ -82,8 +82,6 @@ type reportLabels struct {
 	CallerName        string
 	CallerMobile      string
 	CallerEmail       string
-	CallerIdentity    string
-	CooperationStatus string
 	Cooperative       string
 	Uncooperative     string
 	AttName           string
@@ -170,8 +168,6 @@ var labelsAR = reportLabels{
 	CallerName:        "اسم المتصل",
 	CallerMobile:      "رقم المتصل",
 	CallerEmail:       "بريد المتصل",
-	CallerIdentity:    "هوية المتصل",
-	CooperationStatus: "حالة التعاون",
 	Cooperative:       "متعاون",
 	Uncooperative:     "غير متعاون",
 	AttName:           "اسم الملف",
@@ -258,8 +254,6 @@ var labelsEN = reportLabels{
 	CallerName:        "Caller Name",
 	CallerMobile:      "Caller Mobile",
 	CallerEmail:       "Caller Email",
-	CallerIdentity:    "Caller Identity",
-	CooperationStatus: "Cooperation Status",
 	Cooperative:       "Cooperative",
 	Uncooperative:     "Uncooperative",
 	AttName:           "File Name",
@@ -290,114 +284,6 @@ var labelsEN = reportLabels{
 }
 
 // ── citizen report handler ──────────────────────────────────────────────────
-
-// GenerateCitizenReport is the public endpoint behind the Normal Closure
-// SMS/Email report link ({{report_url}}/{{report_link}}). It re-validates the
-// signed incident token and requires the last 6 digits of the citizen's
-// registered mobile number before returning the citizen-facing PDF (built by
-// buildCitizenReportHTML, a standalone renderer that never shares code with the
-// internal report). Stateless and repeatable: no session/rate-limit state is
-// kept, so the citizen can re-open the link and re-verify any time before the
-// token itself expires.
-func (h *IncidentHandler) GenerateCitizenReport(c *fiber.Ctx) error {
-	idStr := c.Params("id")
-	id, err := uuid.Parse(idStr)
-	if err != nil {
-		return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "invalid_id"))
-	}
-
-	var req struct {
-		SignedToken string `json:"signed_token"`
-		Last6Digits string `json:"last6digits"`
-		Lang        string `json:"lang"`
-	}
-	if err := c.BodyParser(&req); err != nil {
-		return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "invalid_request"))
-	}
-	if req.SignedToken == "" {
-		return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "token_required"))
-	}
-	if req.Last6Digits == "" {
-		return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "last_6_digits_required"))
-	}
-
-	if err := utils.ValidateIncidentToken(req.SignedToken, idStr); err != nil {
-		switch err {
-		case utils.ErrExpired:
-			return utils.ErrorResponse(c, fiber.StatusGone, i18n.T(c.UserContext(), "link_expired"))
-		case utils.ErrInvalid, utils.ErrIDMismatch:
-			return utils.ErrorResponse(c, fiber.StatusUnauthorized, i18n.T(c.UserContext(), "invalid_token"))
-		default:
-			return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "malformed_token"))
-		}
-	}
-
-	if _, err := h.service.FindByIDWithLast6DigitValidation(c.UserContext(), id, req.Last6Digits); err != nil {
-		return utils.ErrorResponse(c, fiber.StatusNotFound, i18n.T(c.UserContext(), "phone_not_recognized"))
-	}
-
-	// Closed-state check (after identity verification so open incidents don't leak status).
-	incident, err := h.incidentRepo.FindByID(c.UserContext(), id)
-	if err != nil {
-		return utils.ErrorResponse(c, fiber.StatusNotFound, i18n.T(c.UserContext(), "incident_not_found"))
-	}
-	isClosed := incident.ClosedAt != nil ||
-		(incident.CurrentState != nil && incident.CurrentState.StateType == "terminal")
-	if !isClosed {
-		return utils.ErrorResponse(c, fiber.StatusForbidden, i18n.T(c.UserContext(), "incident_report_not_available"))
-	}
-
-	reportData, err := h.incidentRepo.GetReportIncidentData(c.UserContext(), id)
-	if err != nil {
-		return utils.ErrorResponse(c, fiber.StatusNotFound, i18n.T(c.UserContext(), "incident_not_found"))
-	}
-	citizenLangAr := req.Lang == "ar" || (req.Lang == "" && c.Query("lang", "ar") != "en")
-	if reportData.LocationID != nil {
-		reportData.LocationName, _ = h.locationRepo.FetchLocationFullPathByID(c.UserContext(), *reportData.LocationID)
-		if citizenLangAr {
-			if p, perr := h.incidentRepo.GetReportHierarchyPathAr(c.UserContext(), "locations", *reportData.LocationID); perr == nil && p != "" {
-				reportData.LocationNameAr = p
-			}
-		}
-	}
-	if reportData.ClassificationID != nil {
-		reportData.ClassificationName, _ = h.classificationRepo.FetchClassificationFullPathByID(c.UserContext(), *reportData.ClassificationID)
-		if citizenLangAr {
-			if p, perr := h.incidentRepo.GetReportHierarchyPathAr(c.UserContext(), "classifications", *reportData.ClassificationID); perr == nil && p != "" {
-				reportData.ClassificationNameAr = p
-			}
-		}
-	}
-
-	reportAttachments, err := h.incidentRepo.GetReportAttachments(c.UserContext(), id)
-	if err != nil {
-		return utils.ErrorResponse(c, fiber.StatusInternalServerError, i18n.T(c.UserContext(), "failed_to_fetch_attachments"))
-	}
-
-	reportLang := req.Lang
-	if reportLang == "" {
-		reportLang = c.Query("lang", "ar")
-	}
-	lbl := labelsAR
-	if reportLang == "en" {
-		lbl = labelsEN
-	}
-
-	leftLogoB64 := fetchLogoBase64(h.cfg.Report.LogoLeftURL)
-	rightLogoB64 := fetchLogoBase64(h.cfg.Report.LogoRightURL)
-
-	htmlBytes := buildCitizenReportHTML(c, h, reportData, leftLogoB64, rightLogoB64, lbl, reportAttachments)
-
-	pdfData, err := renderIncidentHTMLToPDF(htmlBytes, h.cfg.Report.ChromeBin)
-	if err != nil {
-		log.Printf("citizen report pdf render err: %v", err)
-		return utils.ErrorResponse(c, fiber.StatusInternalServerError, i18n.T(c.UserContext(), "failed_to_read_pdf"))
-	}
-
-	c.Set("Content-Type", "application/pdf")
-	c.Set("Content-Disposition", fmt.Sprintf(`inline; filename="incident_%s.pdf"`, reportData.IncidentNumber))
-	return c.Send(pdfData)
-}
 
 // ── handler ───────────────────────────────────────────────────────────────────
 
@@ -876,19 +762,6 @@ body{font-family:'Segoe UI',Tahoma,Arial,sans-serif;font-size:10.5pt;color:#222;
 	if data.DueDate != nil || data.ResolvedAt != nil {
 		row2(&b, l.DueDate, naT(data.DueDate), l.ResolvedAt, naT(data.ResolvedAt))
 	}
-	if strings.TrimSpace(data.CallerIdentityText) != "" {
-		row1(&b, l.CallerIdentity, html.EscapeString(data.CallerIdentityText))
-	}
-	if data.CooperationStatus != "" {
-		coopLabel := data.CooperationStatus
-		switch data.CooperationStatus {
-		case models.CooperationStatusCooperative:
-			coopLabel = l.Cooperative
-		case models.CooperationStatusUncooperative:
-			coopLabel = l.Uncooperative
-		}
-		row1(&b, l.CooperationStatus, html.EscapeString(coopLabel))
-	}
 	b.WriteString(`</table>`)
 
 	// ── Section: Custom Fields ────────────────────────────────────────────────
@@ -1277,19 +1150,6 @@ body{font-family:'Segoe UI',Tahoma,Arial,sans-serif;font-size:10.5pt;color:#222;
 	}
 	if data.ClosedAt != nil {
 		row1(&b, l.ClosedAt, html.EscapeString(tsp(data.ClosedAt)))
-	}
-	if strings.TrimSpace(data.CallerIdentityText) != "" {
-		row1(&b, l.CallerIdentity, html.EscapeString(data.CallerIdentityText))
-	}
-	if data.CooperationStatus != "" {
-		coopLabel := data.CooperationStatus
-		switch data.CooperationStatus {
-		case models.CooperationStatusCooperative:
-			coopLabel = l.Cooperative
-		case models.CooperationStatusUncooperative:
-			coopLabel = l.Uncooperative
-		}
-		row1(&b, l.CooperationStatus, html.EscapeString(coopLabel))
 	}
 	b.WriteString(`</table>`)
 

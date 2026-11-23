@@ -17,15 +17,11 @@ const (
 	FeatureIncidents     FeatureCode = "incidents"
 	FeatureComplaints    FeatureCode = "complaints"
 	FeatureQueries       FeatureCode = "queries"
-	FeatureGoals         FeatureCode = "goals"
 	FeatureWorkflows     FeatureCode = "workflows"
 	FeatureReports       FeatureCode = "reports"
-	FeatureDocuments     FeatureCode = "documents"
 	FeatureEscalation    FeatureCode = "escalation"
-	FeatureAIQuality     FeatureCode = "ai_quality"
 	FeatureSSO           FeatureCode = "sso"
 	FeatureCommunication FeatureCode = "communication"
-	FeatureCallCentre    FeatureCode = "call_centre"
 )
 
 // Feature is the canonical descriptor for a licensable feature.
@@ -33,7 +29,7 @@ type Feature struct {
 	Code              FeatureCode   `json:"code"`
 	Name              string        `json:"name"`
 	Description       string        `json:"description"`
-	PermissionModules []string      `json:"permission_modules"`    // permission-module codes unlocked by this feature
+	PermissionModules []string      `json:"permission_modules"`     // permission-module codes unlocked by this feature
 	Dependencies      []FeatureCode `json:"dependencies,omitempty"` // other features that must be licensed too
 	TierMinimum       string        `json:"tier_minimum,omitempty"` // e.g. "standard", "professional", "enterprise"
 }
@@ -63,24 +59,6 @@ var Catalog = []Feature{
 		TierMinimum:       "standard",
 	},
 	{
-		Code:              FeatureGoals,
-		Name:              "Goals & OKR",
-		Description:       "Goal management, metrics, evidence, performance reviews, OKR alignment, templates, and analytics.",
-		PermissionModules: []string{"goals"},
-		TierMinimum:       "professional",
-	},
-	{
-		Code: FeatureDocuments,
-		Name: "Document Management",
-		Description: "File storage, versioning, comments, and tagging via Documenta DMS integration.",
-		// documents routes currently reuse goals:* permissions (see cmd/server/main.go).
-		// A follow-up should introduce dedicated documents:view/update permissions and
-		// list them here. Until then this is intentionally empty.
-		PermissionModules: []string{},
-		Dependencies:      []FeatureCode{FeatureGoals},
-		TierMinimum:       "professional",
-	},
-	{
 		Code:              FeatureWorkflows,
 		Name:              "Workflow Designer",
 		Description:       "Visual workflow designer with custom states, transitions, and approval rules.",
@@ -102,14 +80,6 @@ var Catalog = []Feature{
 		TierMinimum:       "enterprise",
 	},
 	{
-		Code:              FeatureAIQuality,
-		Name:              "AI Quality Audit",
-		Description:       "AI-powered quality scoring and feedback for incidents and interactions.",
-		PermissionModules: []string{},
-		Dependencies:      []FeatureCode{FeatureIncidents},
-		TierMinimum:       "enterprise",
-	},
-	{
 		Code:              FeatureSSO,
 		Name:              "SSO / LDAP",
 		Description:       "Single sign-on via SAML/OIDC and LDAP user sync.",
@@ -123,13 +93,6 @@ var Catalog = []Feature{
 		PermissionModules: []string{"templates", "notifications"},
 		TierMinimum:       "standard",
 	},
-	{
-		Code:              FeatureCallCentre,
-		Name:              "Call Centre",
-		Description:       "SIP call handling, call logs, caller sentiment analysis.",
-		PermissionModules: []string{"call-logs", "caller-sentiment"},
-		TierMinimum:       "enterprise",
-	},
 }
 
 // AllCodes returns every feature code — used by the dev seeder to issue full-scope licenses.
@@ -142,7 +105,7 @@ func AllCodes() []string {
 }
 
 // ModulesForFeature returns the permission modules gated by a feature. Empty slice if
-// the feature exists but gates no permission modules (e.g., sso, ai_quality).
+// the feature exists but gates no permission modules (e.g., sso).
 func ModulesForFeature(code FeatureCode) []string {
 	for _, f := range Catalog {
 		if f.Code == code {

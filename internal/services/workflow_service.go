@@ -895,6 +895,7 @@ func (s *workflowService) DuplicateWorkflow(ctx context.Context, id uuid.UUID, c
 					FieldValue:      req.FieldValue,
 					IsMandatory:     req.IsMandatory,
 					ErrorMessage:    req.ErrorMessage,
+					Config:          req.Config,
 				}
 			}
 			s.repo.SetTransitionRequirements(ctx, newTrans.ID, newReqs)
@@ -1104,7 +1105,6 @@ func (s *workflowService) CreateState(ctx context.Context, workflowID uuid.UUID,
 		SLAHours:                     req.SLAHours,
 		SLAUnit:                      req.SLAUnit,
 		IsMergable:                   req.IsMergable,
-		IsAIQA:                       req.IsAIQA,
 		LockAssignee:                 req.LockAssignee,
 		IsReadyToClose:               req.IsReadyToClose,
 		IsPartialClose:               req.IsPartialClose,
@@ -1271,9 +1271,6 @@ func (s *workflowService) UpdateState(ctx context.Context, stateID uuid.UUID, re
 	}
 	if req.IsMergable != nil {
 		state.IsMergable = *req.IsMergable
-	}
-	if req.IsAIQA != nil {
-		state.IsAIQA = *req.IsAIQA
 	}
 	if req.LockAssignee != nil {
 		state.LockAssignee = *req.LockAssignee
@@ -1674,6 +1671,7 @@ func (s *workflowService) SetTransitionRequirements(ctx context.Context, transit
 			IsMandatory:     req.IsMandatory,
 			IsMultiple:      req.IsMultiple,
 			ErrorMessage:    req.ErrorMessage,
+			Config:          req.Config,
 		}
 	}
 	return s.repo.SetTransitionRequirements(ctx, transitionID, requirements)
@@ -1810,8 +1808,6 @@ func (s *workflowService) MatchWorkflow(ctx context.Context, req *models.Workflo
 		{Field: "due_date", Label: "Due Date", Description: "Resolution deadline", IsRequired: false},
 		{Field: "reporter_name", Label: "Reporter Name", Description: "Name of person reporting", IsRequired: false},
 		{Field: "reporter_email", Label: "Reporter Email", Description: "Email of person reporting", IsRequired: false},
-		{Field: "caller_identity_text", Label: "Caller Identity", Description: "Who the caller is", IsRequired: false},
-		{Field: "cooperation_status", Label: "Cooperation Status", Description: "Cooperative or Uncooperative", IsRequired: false},
 	}
 
 	// Default response when no workflow matches
@@ -2148,6 +2144,7 @@ func (s *workflowService) ExportWorkflow(ctx context.Context, id uuid.UUID) ([]b
 				FieldValue:      req.FieldValue,
 				IsMandatory:     req.IsMandatory,
 				ErrorMessage:    req.ErrorMessage,
+				Config:          req.Config,
 			}
 		}
 
@@ -2558,6 +2555,7 @@ func (s *workflowService) ImportWorkflow(ctx context.Context, data *models.Workf
 				FieldValue:      reqData.FieldValue,
 				IsMandatory:     reqData.IsMandatory,
 				ErrorMessage:    reqData.ErrorMessage,
+				Config:          reqData.Config,
 			}
 
 			if err := tx.Create(requirement).Error; err != nil {

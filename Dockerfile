@@ -1,45 +1,57 @@
-# Build stage
+# syntax=docker/dockerfile:1
+
+# ---- Build stage -------------------------------------------------------------
 FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
-# Install dependencies
 RUN apk add --no-cache git
 
-# Copy go mod files
+# Dependencies first, so source changes don't invalidate the module cache layer
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source code
 COPY . .
 
-# Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/main ./cmd/server
 
-# Final stage
-FROM alpine:latest
+# ---- Runtime stage -----------------------------------------------------------
+FROM alpine:3.22
 
 WORKDIR /app
 
-# Install ca-certificates, Chromium and its dependencies for PDF generation
-RUN apk --no-cache add \
-    ca-certificates \
-    chromium \
-    nss \
-    freetype \
-    harfbuzz \
-    ttf-freefont \
-    font-noto \
-    dbus
+# ca-certificates: outbound TLS (Documanta, SMTP, SSO)
+# tzdata:          Asia/Riyadh and other zones for scheduled jobs
+# chromium + fonts: headless PDF rendering of reports (CHROME_BIN below);
+#                   font-noto-arabic is needed for Arabic text in PDFs
+RUN apk add --no-cache \
+      ca-certificates \
+      tzdata \
+      wget \
+      chromium \
+      nss \
+      freetype \
+      harfbuzz \
+      ttf-freefont \
+      font-noto \
+      font-noto-arabic \
+      dbus \
+ && addgroup -S app && adduser -S -G app -h /app app
 
-# Copy binary from builder
-COPY --from=builder /app/main .
+COPY --from=builder /out/main /app/main
 
-# Copy Firebase credentials
-COPY automax3-firebase-adminsdk-fbsvc-99cd353ef1.json .
+# Report PDF generation calls this binary (config: CHROME_BIN, default google-chrome)
+ENV CHROME_BIN=/usr/bin/chromium-browser \
+    TZ=Asia/Riyadh
 
-# Expose port
+# Firebase credentials are NOT baked into the image. To enable push notifications,
+# mount the JSON file and set FIREBASE_CREDENTIAL_PATH to its path inside the container.
+
+USER app
+
 EXPOSE 8080
 
-# Run the application
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:${SERVER_PORT:-8080}/api/v1/health >/dev/null || exit 1
+
 CMD ["./main"]

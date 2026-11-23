@@ -38,8 +38,6 @@ type IncidentHandler struct {
 	storage             *storage.MinIOStorage
 	presenceService     services.PresenceService
 	readyToCloseService services.ReadyToCloseService
-	ivrSmsLinkRepo      repository.IvrSmsLinkRepository
-	publicFeedbackRepo  repository.IncidentPublicFeedbackRepository
 	lookupRepo          repository.LookupRepository
 	validator           *validator.Validate
 	cfg                 *config.Config
@@ -73,16 +71,6 @@ func maskMobileForLog(m string) string {
 		return "***"
 	}
 	return strings.Repeat("*", len(m)-3) + m[len(m)-3:]
-}
-
-// SetIvrSmsLinkRepo wires in the IvrSmsLinkRepository for SMS link lifecycle management.
-func (h *IncidentHandler) SetIvrSmsLinkRepo(repo repository.IvrSmsLinkRepository) {
-	h.ivrSmsLinkRepo = repo
-}
-
-// SetPublicFeedbackRepo wires in the feedback repository for submitted-status checks.
-func (h *IncidentHandler) SetPublicFeedbackRepo(repo repository.IncidentPublicFeedbackRepository) {
-	h.publicFeedbackRepo = repo
 }
 
 // SetReadyToCloseService wires in the ReadyToCloseService for duration-options endpoint.
@@ -140,8 +128,6 @@ func (h *IncidentHandler) CreateIncident(c *fiber.Ctx) error {
 	}
 
 	// Parse query parameters
-	req.CallerIdentityText = strings.TrimSpace(req.CallerIdentityText)
-	req.CooperationStatus = strings.ToLower(strings.TrimSpace(req.CooperationStatus))
 	validationErrors := validation.ValidateStruct(c.UserContext(), &req)
 
 	if req.AlternateMobile != "" && utils.SameMobile(req.AlternateMobile, req.ReporterPhone) {
@@ -310,8 +296,6 @@ func parseIncidentSearchBodyExtras(c *fiber.Ctx, filter *models.IncidentFilter) 
 	if len(body.CustomFieldFilters) > 0 {
 		filter.CustomFieldFilters = body.CustomFieldFilters
 	}
-
-	filter.CooperationStatus = strings.ToLower(strings.TrimSpace(filter.CooperationStatus))
 
 	loc := utils.ResolveTimezone(body.Timezone)
 	if body.StartDateStr != "" && filter.StartDate == nil {
@@ -801,8 +785,6 @@ func (h *IncidentHandler) scopeIncidentFilterToUser(c *fiber.Ctx, filter *models
 
 // listIncidentsCore contains the shared logic for both ListIncidents (GET) and SearchIncidents (POST).
 func (h *IncidentHandler) listIncidentsCore(c *fiber.Ctx, filter *models.IncidentFilter) error {
-	filter.CooperationStatus = strings.ToLower(strings.TrimSpace(filter.CooperationStatus))
-
 	if validationErrors := validation.ValidateStruct(c.UserContext(), filter); len(validationErrors) != 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"success": false,
@@ -832,7 +814,7 @@ func (h *IncidentHandler) listIncidentsCore(c *fiber.Ctx, filter *models.Inciden
 	if h.isEpmPortalRequest(c) {
 		// @NOEDIT: this is not a bug this is a client requirement please dont touch
 		// Portal requests must be scoped to a specific caller identity
-		if filter.CallerIdentity == "" && filter.ReporterPhone == "" {
+		if filter.ReporterPhone == "" {
 			return c.JSON(fiber.Map{
 				"success":     true,
 				"data":        []models.EpmPortalIncidentResponse{},
@@ -866,174 +848,6 @@ func (h *IncidentHandler) listIncidentsCore(c *fiber.Ctx, filter *models.Inciden
 		"total_pages": totalPages,
 	})
 }
-func (h *IncidentHandler) FindByIDWithLast6DigitValidation(c *fiber.Ctx) error {
-	clientCode := strings.TrimSpace(h.cfg.ClientCode)
-	if !strings.EqualFold(clientCode, constants.CLIENT_CODE.EPM940) {
-		return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "service_unavailable_client"))
-	}
-
-	idStr := c.Params("id")
-	id, err := uuid.Parse(idStr)
-	if err != nil {
-		return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "invalid_id"))
-	}
-
-	last6Digits := c.Query("last6digits")
-	if last6Digits == "" {
-		return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "last_6_digits_required"))
-	}
-
-	// Validate signed token
-	token := c.Query("signed_token")
-	if token == "" {
-		return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "token_required"))
-	}
-	log.Printf("Signed token recieved %s", token)
-	if err := utils.ValidateIncidentToken(token, idStr); err != nil {
-		log.Printf("Token validation failed: %v", err)
-		switch err {
-		case utils.ErrExpired:
-			return utils.ErrorResponse(c, fiber.StatusGone, i18n.T(c.UserContext(), "link_expired"))
-		case utils.ErrInvalid, utils.ErrIDMismatch:
-			return utils.ErrorResponse(c, fiber.StatusUnauthorized, i18n.T(c.UserContext(), "invalid_token"))
-		default:
-			return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "malformed_token"))
-		}
-	}
-
-	// Check the IVR SMS link record: is it still active, and has the citizen already submitted?
-	if h.ivrSmsLinkRepo != nil {
-		tokenHash := utils.HashToken(token)
-		link, err := h.ivrSmsLinkRepo.FindByTokenHash(c.UserContext(), tokenHash, id)
-		if err != nil || link == nil {
-			log.Printf("IVR SMS link not found for token hash %s incident %s: %v", tokenHash, idStr, err)
-			return utils.ErrorResponse(c, fiber.StatusUnauthorized, i18n.T(c.UserContext(), "link_not_recognized"))
-		}
-		if !link.IsActive {
-			return utils.ErrorResponse(c, fiber.StatusGone, i18n.T(c.UserContext(), "newer_link_sent"))
-		}
-		if link.SubmittedAt != nil {
-			// Citizen already submitted — tell the frontend to show the "Update Submitted" screen.
-			return c.Status(fiber.StatusAlreadyReported).JSON(fiber.Map{
-				"data": map[string]interface{}{
-					"success":           false,
-					"already_submitted": true,
-					"error":             i18n.T(c.UserContext(), "citizen_already_submitted"),
-				},
-			})
-		}
-	}
-
-	log.Println("incident last6 digit op start")
-	incident, err := h.service.FindByIDWithLast6DigitValidation(c.UserContext(), id, last6Digits)
-	if err != nil {
-		log.Printf("Err fetching Incident via last 6 digit and id %v ", err)
-		return utils.ErrorResponse(c, fiber.StatusNotFound, i18n.T(c.UserContext(), "phone_not_recognized"))
-	}
-
-	authResponse, err := h.userService.GenerateTokenViaUserID(c.UserContext(), incident.ReporterID)
-	if err != nil {
-		log.Printf("Err creating auth response via last 6 digit and id %v ", err)
-		return utils.ErrorResponse(c, fiber.StatusNotFound, i18n.T(c.UserContext(), "incident_not_exist_updated"))
-	}
-
-	log.Printf("Incident fetched successfully, proceeding to authenticate user via last 6 digits")
-	// Create Session and store in session and in response for short life of 15 minutes, to be used for subsequent requests without requiring last 6 digit validation again
-	// Generate a 15-minute IVR session token for subsequent IVR SMS requests
-
-	// sessionToken := utils.GenerateIvrSessionToken(idStr, 10*time.Minute)
-	log.Println("incident last6 digit op end, successful authentication")
-
-	data := fiber.Map{
-		"incident": incident,
-		// "session_token": sessionToken,
-		"auth_data": authResponse,
-	}
-	return utils.SuccessResponse(c, fiber.StatusOK, i18n.T(c.UserContext(), "incident_retrieved"), data)
-}
-
-// FindByIDForFeedback validates a closure feedback link and returns minimal incident info.
-// Public endpoint — no authentication required.
-// Input: path param :id (incident UUID), query param signed_token (incident/feedback token).
-// Returns 410 Gone if feedback has already been submitted.
-func (h *IncidentHandler) FindByIDForFeedback(c *fiber.Ctx) error {
-	idStr := c.Params("id")
-	id, err := uuid.Parse(idStr)
-	if err != nil {
-		return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "invalid_id"))
-	}
-
-	token := c.Query("signed_token")
-	if token == "" {
-		return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "token_required"))
-	}
-
-	// Determine token type and validate; also extract feedbackID when available.
-	var feedbackID *uuid.UUID
-
-	if parsed, uuidErr := uuid.Parse(token); uuidErr == nil {
-		// Plain UUID — treat as feedbackID directly, no HMAC validation.
-		feedbackID = &parsed
-	} else if parts := strings.Split(token, "|"); len(parts) == 5 && parts[0] == "fb" {
-		// fb-format token: fb|feedbackID|incidentID|expiresAt|hmac
-		if _, valErr := utils.ValidateFeedbackToken(token, parts[1], idStr); valErr != nil {
-			log.Printf("[FindByIDForFeedback] fb-token validation failed for incident %s: %v", idStr, valErr)
-			switch {
-			case errors.Is(valErr, utils.ErrExpired):
-				return utils.ErrorResponse(c, fiber.StatusGone, i18n.T(c.UserContext(), "link_expired"))
-			default:
-				return utils.ErrorResponse(c, fiber.StatusUnauthorized, i18n.T(c.UserContext(), "invalid_token"))
-			}
-		}
-		if parsed, pErr := uuid.Parse(parts[1]); pErr == nil {
-			feedbackID = &parsed
-		}
-	} else {
-		// 3-part incident token
-		if valErr := utils.ValidateIncidentToken(token, idStr); valErr != nil {
-			log.Printf("[FindByIDForFeedback] token validation failed for incident %s: %v", idStr, valErr)
-			switch valErr {
-			case utils.ErrExpired:
-				return utils.ErrorResponse(c, fiber.StatusGone, i18n.T(c.UserContext(), "link_expired"))
-			case utils.ErrInvalid, utils.ErrIDMismatch:
-				return utils.ErrorResponse(c, fiber.StatusUnauthorized, i18n.T(c.UserContext(), "invalid_token"))
-			default:
-				return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "malformed_token"))
-			}
-		}
-	}
-
-	// Check if feedback has already been submitted — if so the link is invalid.
-	if h.publicFeedbackRepo != nil {
-		var f *models.IncidentPublicFeedback
-		if feedbackID != nil {
-			f, _ = h.publicFeedbackRepo.FindByID(c.UserContext(), *feedbackID)
-		} else {
-			f, _ = h.publicFeedbackRepo.FindLatestByIncidentID(c.UserContext(), id)
-		}
-		if f != nil && f.SubmittedAt != nil {
-			log.Printf("[FindByIDForFeedback] feedback already submitted for incident %s feedbackID %s", idStr, f.ID)
-			return utils.ErrorResponse(c, fiber.StatusGone, i18n.T(c.UserContext(), "feedback_already_submitted"))
-		}
-	}
-
-	incident, err := h.incidentRepo.FindByIDWithRelations(c.UserContext(), id)
-	if err != nil {
-		return utils.ErrorResponse(c, fiber.StatusNotFound, i18n.T(c.UserContext(), "incident_not_found"))
-	}
-
-	status := ""
-	if incident.CurrentState != nil {
-		status = incident.CurrentState.Name
-	}
-
-	return utils.SuccessResponse(c, fiber.StatusOK, i18n.T(c.UserContext(), "incident_retrieved"), fiber.Map{
-		"incident_number": incident.IncidentNumber,
-		"description":     incident.Description,
-		"status":          status,
-	})
-}
-
 func (h *IncidentHandler) UpdateIncident(c *fiber.Ctx) error {
 	idStr := c.Params("id")
 	id, err := uuid.Parse(idStr)
@@ -1056,26 +870,7 @@ func (h *IncidentHandler) UpdateIncident(c *fiber.Ctx) error {
 		return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "invalid_request_body"))
 	}
 
-	if req.CallerIdentityText != nil {
-		v := strings.TrimSpace(*req.CallerIdentityText)
-		req.CallerIdentityText = &v
-	}
-	if req.CooperationStatus != nil {
-		v := strings.ToLower(strings.TrimSpace(*req.CooperationStatus))
-		req.CooperationStatus = &v
-	}
-
 	validationErrors := validation.ValidateStruct(c.UserContext(), &req)
-	if req.CooperationStatus != nil {
-		switch *req.CooperationStatus {
-		case "", "cooperative", "uncooperative":
-		default:
-			if validationErrors == nil {
-				validationErrors = map[string]string{}
-			}
-			validationErrors["cooperation_status"] = i18n.T(c.UserContext(), "invalid_cooperation_status")
-		}
-	}
 	if len(validationErrors) != 0 {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"success": false,
@@ -2446,104 +2241,6 @@ func (h *IncidentHandler) UpdateClosedIncidentSummary(c *fiber.Ctx) error {
 	return utils.SuccessResponse(c, fiber.StatusOK, i18n.T(c.UserContext(), "closed_summary_updated"), updatedIncident)
 }
 
-// RequestCitizenInfo sends an SMS to the citizen requesting additional information (attachments, location, comments)
-// for an incident that lacks required fields like attachments.
-func (h *IncidentHandler) RequestCitizenInfo(c *fiber.Ctx) error {
-	idStr := c.Params("id")
-	incidentID, err := uuid.Parse(idStr)
-	if err != nil {
-		return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "invalid_incident_id"))
-	}
-
-	userID := c.Locals(constants.ContextKeys.UserID).(uuid.UUID)
-	// Fetch incident with relations to get attachments, reporter info
-	incident, err := h.incidentRepo.FindByIDWithRelations(c.UserContext(), incidentID)
-	if err != nil {
-		return utils.ErrorResponse(c, fiber.StatusNotFound, i18n.T(c.UserContext(), "incident_not_found"))
-	}
-
-	// Determine citizen phone number to send SMS to.
-	// ReporterPhone is the citizen's captured phone across all channels (IVR, web, mobile, agent-logged).
-	// CreatedByMobile is a MOMRA/EPM-specific fallback (same value as ReporterPhone in that flow).
-	// ReporterID fallback is only used when reporter is confirmed to have the citizen role.
-	mobile := incident.ReporterPhone
-	if mobile == "" {
-		mobile = incident.CreatedByMobile
-	}
-	if mobile == "" && incident.ReporterID != nil {
-		roles, err := h.userRepo.GetUserRoles(c.UserContext(), *incident.ReporterID)
-		if err == nil {
-			for _, r := range roles {
-				if r.Code == constants.USER_ROLE.CITIZEN {
-					if reporter, err := h.userRepo.FindByID(c.UserContext(), *incident.ReporterID); err == nil && reporter.Phone != "" {
-						mobile = reporter.Phone
-					}
-					break
-				}
-			}
-		}
-	}
-	if mobile == "" {
-		return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "no_mobile_number"))
-	}
-
-	// Build secure SMS link — generate the raw token first so we can hash and store it.
-	const ivrSmsDuration = 48 * time.Hour
-	rawToken := utils.GenerateIncidentToken(incidentID.String(), ivrSmsDuration)
-	smsLink := utils.BuildSMSLinkFromToken(c.UserContext(), incidentID.String(), rawToken)
-
-	lang, ok := c.Locals(constants.ContextKeys.ACCEPT_LANGUAGE).(string)
-	if !ok || lang == "" {
-		lang = "en" // Default language
-	}
-
-	now := time.Now()
-	smsErr := h.notificationService.SendSMSTemplate(
-		c.UserContext(), "INCIDENT_REQUEST_INFO_SMS", lang, mobile,
-		map[string]string{
-			"sms_link":        smsLink,
-			"incident_number": incident.IncidentNumber,
-		},
-		&userID, &incidentID,
-	)
-	status := "sent"
-	if smsErr != nil {
-		status = "failed"
-		log.Printf("REQUEST-INFO-SMS: Failed for incident %s to %s: %v", incident.IncidentNumber, maskMobileForLog(mobile), smsErr)
-	} else {
-		log.Printf("REQUEST-INFO-SMS: Sent via template to %s for incident %s", maskMobileForLog(mobile), incident.IncidentNumber)
-	}
-
-	// Track IVR SMS link: deactivate old links, create new record.
-	if h.ivrSmsLinkRepo != nil && smsErr == nil {
-		_ = h.ivrSmsLinkRepo.DeactivateAllForIncident(c.UserContext(), incidentID)
-		_ = h.ivrSmsLinkRepo.Create(c.UserContext(), &models.IvrSmsLink{
-			IncidentID: incidentID,
-			TokenHash:  utils.HashToken(rawToken),
-			SentBy:     &userID,
-			SentAt:     now,
-			ExpiresAt:  now.Add(ivrSmsDuration),
-			IsActive:   true,
-		})
-		// Log revision so agents can see the SMS send event in the audit trail.
-		_ = h.service.CreateRevision(c.UserContext(), incidentID,
-			models.RevisionActionIVRSmsSent,
-			fmt.Sprintf("Agent requested additional information from citizen via SMS to %s", mobile),
-			fmt.Sprintf("طلب الوكيل معلومات إضافية من المواطن عبر الرسائل القصيرة إلى %s", mobile),
-			nil, userID)
-	}
-
-	if smsErr != nil {
-		return utils.ErrorResponse(c, fiber.StatusInternalServerError, i18n.Tf(c.UserContext(), "failed_to_send_sms", smsErr))
-	}
-
-	return utils.SuccessResponse(c, fiber.StatusOK, i18n.T(c.UserContext(), "sms_sent_citizen"), fiber.Map{
-		"mobile":          mobile,
-		"incident_number": incident.IncidentNumber,
-		"status":          status,
-	})
-}
-
 // ForceState directly sets current_state_id on an incident, bypassing workflow
 // transition logic. Intended for system-level bridge syncs only.
 // Accepts either state_id (UUID) or state_name, resolves and validates against
@@ -2640,8 +2337,7 @@ func extractSourceFromBody(c *fiber.Ctx) string {
 	return ""
 }
 
-// buildEpmPortalResponse builds the portal-trimmed response. When includeGis is true
-// (single-incident detail), the gis_location field is populated; for listing it is omitted.
+// buildEpmPortalResponse builds the portal-trimmed response.
 func (h *IncidentHandler) buildEpmPortalResponse(c *fiber.Ctx, incident *models.IncidentResponse, includeGis bool) models.EpmPortalIncidentResponse {
 	resp := models.EpmPortalIncidentResponse{
 		ID:             incident.ID,
@@ -2649,7 +2345,6 @@ func (h *IncidentHandler) buildEpmPortalResponse(c *fiber.Ctx, incident *models.
 		ReporterName:   incident.ReporterName,
 		ReporterEmail:  incident.ReporterEmail,
 		ReporterPhone:  incident.ReporterPhone,
-		CallerIdentity: incident.CallerIdentity,
 		Address:        incident.Address,
 		Description:    incident.Description,
 	}
@@ -2683,14 +2378,6 @@ func (h *IncidentHandler) buildEpmPortalResponse(c *fiber.Ctx, incident *models.
 		resp.CurrentState = &models.EpmPortalStateInfo{
 			Name:   incident.CurrentState.Name,
 			NameAr: incident.CurrentState.NameAr,
-		}
-	}
-
-	// GIS location: only included for single-incident detail, not listing
-	if includeGis && len(incident.GisLocation) > 0 {
-		var cf interface{}
-		if err := json.Unmarshal(incident.GisLocation, &cf); err == nil {
-			resp.GisLocation = cf
 		}
 	}
 

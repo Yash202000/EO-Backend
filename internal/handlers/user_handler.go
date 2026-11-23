@@ -298,8 +298,6 @@ func (h *UserHandler) ListUsers(c *fiber.Ctx) error {
 	limit, _ := strconv.Atoi(c.Query("limit", "10"))
 	search := c.Query("search", "")
 	phone := strings.TrimSpace(c.Query("phone", ""))
-	extension := strings.TrimSpace(c.Query("extension", ""))
-	callStatus := strings.TrimSpace(c.Query("call_status", ""))
 	withIncident, _ := strconv.ParseBool(c.Query("with_incident", "false"))
 
 	roleIDs := utils.ParseUUIDList(c.Query("role_ids", ""))
@@ -366,7 +364,7 @@ func (h *UserHandler) ListUsers(c *fiber.Ctx) error {
 		limit = 1000
 	}
 
-	users, total, err := h.userService.ListUsers(c.UserContext(), page, limit, search, phone, extension, callStatus, roleIDs, departmentIDs, locationIDs, classificationIDs, withIncident, withIVR, false)
+	users, total, err := h.userService.ListUsers(c.UserContext(), page, limit, search, phone, roleIDs, departmentIDs, locationIDs, classificationIDs, withIncident, withIVR, false)
 	if err != nil {
 		return utils.ErrorResponse(c, fiber.StatusInternalServerError, i18n.T(c.UserContext(), "failed_to_fetch_users"))
 	}
@@ -439,7 +437,6 @@ func (h *UserHandler) AdminCreateUser(c *fiber.Ctx) error {
 		req.FirstName = c.FormValue("first_name")
 		req.LastName = c.FormValue("last_name")
 		req.Phone = c.FormValue("phone")
-		req.Extension = c.FormValue("extension")
 
 		// Parse optional UUID fields
 		if deptID := c.FormValue("department_id"); deptID != "" {
@@ -715,45 +712,6 @@ func (h *UserHandler) MatchUsers(c *fiber.Ctx) error {
 	return utils.SuccessResponse(c, fiber.StatusOK, i18n.T(c.UserContext(), "users_matched"), matchResponse)
 }
 
-func (h *UserHandler) UpdateUserCallStatus(c *fiber.Ctx) error {
-	// Get Extension from Params
-	userExt := c.Params("userExtID")
-	var req struct {
-		Status string `json:"call_status"`
-	}
-	if err := c.BodyParser(&req); err != nil {
-		return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "invalid_request_body"))
-	}
-	validStatuses := map[string]bool{
-		"available": true,
-		"online":    true,
-		"in_call":   true,
-		"offline":   true,
-	}
-	if !validStatuses[req.Status] {
-		return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.Tf(c.UserContext(), "invalid_status", req.Status))
-	}
-
-	if strings.EqualFold(req.Status, "available") {
-		req.Status = string(models.CallStatusOnline) // "online"
-	}
-	// Call Service
-	resp, err := h.userService.UpdateUserCallStatus(c.UserContext(), userExt, req.Status)
-	if err != nil {
-		return utils.InternalErrorResponse(c, err, i18n.T(c.UserContext(), "internal_server_error"))
-	}
-
-	// Broadcast the availability change to all broadcast clients (e.g. incident
-	// assignee dropdowns) so they can reflect live agent status. The payload map
-	// returned by the service already contains id, extension, call_status and
-	// updated_at, matching the identifiers the ["admin","users"] list uses.
-	if h.wsHub != nil {
-		h.wsHub.BroadcastToAll("user_status_changed", resp)
-	}
-
-	return utils.SuccessResponse(c, fiber.StatusOK, i18n.T(c.UserContext(), "user_call_status_updated"), resp)
-}
-
 // Export exports all users as JSON
 func (h *UserHandler) Export(c *fiber.Ctx) error {
 	// Department-scoped: users with view_department_only can only export their own department's users.
@@ -768,7 +726,7 @@ func (h *UserHandler) Export(c *fiber.Ctx) error {
 	}
 
 	// Get all users without pagination
-	users, _, err := h.userService.ListUsers(c.UserContext(), 1, 10000, "", "", "", "", nil, departmentIDs, nil, nil, false, false)
+	users, _, err := h.userService.ListUsers(c.UserContext(), 1, 10000, "", "", nil, departmentIDs, nil, nil, false, false)
 	if err != nil {
 		return utils.InternalErrorResponse(c, err, i18n.T(c.UserContext(), "internal_server_error"))
 	}
@@ -815,7 +773,6 @@ func (h *UserHandler) Export(c *fiber.Ctx) error {
 			"classification_ids": classificationIDs,
 			"is_active":          user.IsActive,
 			"is_super_admin":     user.IsSuperAdmin,
-			"extension":          user.Extension,
 			"last_login_at":      user.LastLoginAt,
 			"created_at":         user.CreatedAt,
 		}
@@ -893,7 +850,6 @@ func (h *UserHandler) Import(c *fiber.Ctx) error {
 		FirstName string `json:"first_name"`
 		LastName  string `json:"last_name"`
 		Phone     string `json:"phone"`
-		Extension string `json:"extension"`
 		// DepartmentID      *uuid.UUID `json:"department_id"`
 		// LocationID        *uuid.UUID `json:"location_id"`
 		// RoleIDs           []string   `json:"role_ids"`
@@ -951,7 +907,6 @@ func (h *UserHandler) Import(c *fiber.Ctx) error {
 			FirstName: data.FirstName,
 			LastName:  data.LastName,
 			Phone:     data.Phone,
-			// Extension: data.Extension,
 			// DepartmentID:      data.DepartmentID,
 			// LocationID:        data.LocationID,
 			// RoleIDs:           parseImportUUIDs(data.RoleIDs),

@@ -150,13 +150,6 @@ func (r *classificationRepository) Create(ctx context.Context, classification *m
 		if err := tx.Create(classification).Error; err != nil {
 			return err
 		}
-		// A classification that gains a child can no longer be a leaf, so it can no
-		// longer be marked NASAQ - clear it here regardless of its prior value.
-		if parent != nil && parent.IsNasaq {
-			if err := tx.Model(&models.Classification{}).Where("id = ?", parent.ID).Update("is_nasaq", false).Error; err != nil {
-				return err
-			}
-		}
 		return nil
 	})
 }
@@ -565,7 +558,6 @@ countDone:
 			Level:       cls.Level,
 			Path:        cls.Path,
 			IsActive:    cls.IsActive,
-			IsNasaq:     cls.IsNasaq,
 			SortOrder:   cls.SortOrder,
 			Count:       countMap[cls.ID],
 			Children:    []models.ClassificationWithStats{},
