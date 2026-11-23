@@ -25,19 +25,9 @@ type Config struct {
 	CountryCode                 string // env: COUNTRY_CODE (e.g. +966, +91)
 	Escalation                  EscalationConfig
 	ReadyToClose                ReadyToCloseConfig
-	SmsFeedback                 SmsFeedbackConfig
 	Documenta                   DocumentaConfig
-	KpiDocumenta                DocumentaConfig
-	AIQuality                   AIQualityConfig
-	Nasaq                       NasaqConfig
-	AutoAssign                  AutoAssignConfig
-	GoalManagement              GoalManagementConfig
 	License                     LicenseConfig
 	Integration                 IntegrationConfig
-	FinalCloseWhatsAppFeedback  FinalCloseWhatsAppFeedbackConfig
-	Cintrix                     CintrixConfig
-	PBX                         PBXConfig
-	MOMRA                       MOMRAConfig
 	SyncDeptAttributesToUser    bool   // env: SYNC_DEPT_ATTRIBUTES_TO_USER — when true, assigning a department to a user auto-appends the department's locations/classifications to that user. Default: false.
 	MaxDescriptionLength        int    // env: MAX_DESCRIPTION_LENGTH — max description length allowed for incident creation for EPM940 clients. Default: 500.
 	ClientCode                  string // env: CLIENT_CODE — client identifier, e.g. "EPM940".
@@ -46,7 +36,6 @@ type Config struct {
 	CitizenAttachmentSizeLimit  string // env: CITIZEN_ATTACHMENT_SIZE_LIMIT — max attachment size in bytes for citizen-submitted incidents (EPM940 ENV_CONFIGURATION lookup value). Default: 5242880 (5MB).
 	InternalAttachmentSizeLimit string // env: INTERNAL_ATTACHMENT_SIZE_LIMIT — max attachment size in bytes for internally-created incidents (EPM940 ENV_CONFIGURATION lookup value). Default: 10485760 (10MB).
 	ChatbotURL                  string // env: CHATBOT_URL — URL of the chatbot (EPM940 ENV_CONFIGURATION lookup value). Default: placeholder — override in .env.
-	KpiDictionaryWorkflowCode   string // env: KPI_DICTIONARY_WORKFLOW_CODE — Workflow.Code the KPI Workflow (Draft->Reviewed->Approved->Active->Closed) is looked up by. Default: "kpi_dictionary_workflow" — must match the Code seeded in seed_kpi_dictionary_workflow.go, or nothing will resolve.
 	Geo                         GeoConfig
 }
 
@@ -100,32 +89,6 @@ type ImageValidationConfig struct {
 	BlurCoverageFraction float64
 }
 
-// PBXConfig holds settings for the external PBX used by the extension-assignment
-// feature. The extension pool is fetched from BaseURL with "?action=list".
-type PBXConfig struct {
-	// BaseURL is the PBX endpoint that lists/creates extensions, e.g.
-	// https://zkff.automaxsw.com/create_user.php. The extension pool is read from
-	// BaseURL + "?action=list"; a single extension from + "&username=<ext>".
-	// env: PBX_BASE_URL
-	BaseURL string
-	// InsecureSkipVerify disables PBX TLS certificate validation. Dev/staging
-	// escape hatch only; defaults to false. env: PBX_INSECURE_SKIP_VERIFY
-	InsecureSkipVerify bool
-}
-
-// FinalCloseWhatsAppFeedbackConfig holds settings for deleting a still-active
-// WhatsApp feedback session once the final-close feedback has already been
-// submitted via another channel (e.g. the SMS fallback link), so the WhatsApp
-// feedback link stops working for the reporter.
-type FinalCloseWhatsAppFeedbackConfig struct {
-	// SessionBaseURL is the full session endpoint of the WhatsApp feedback API,
-	// including the "/session" path segment, e.g.
-	// https://unicam.discretal.com/automax3-feedback/session. The mobile number
-	// is appended directly to this value to form the DELETE URL.
-	// env: FINAL_CLOSE_WHATSAPP_FEEDBACK_SESSION_BASE_URL
-	SessionBaseURL string
-}
-
 type IntegrationConfig struct {
 	SecretsKey string // env: INTEGRATION_SECRETS_KEY (64-char hex = 32 bytes for AES-256-GCM)
 }
@@ -155,47 +118,6 @@ type ReportConfig struct {
 	AppRegion string
 }
 
-// AIQualityConfig holds settings for the AI Quality Monitor.
-type AIQualityConfig struct {
-	// APIEndpoint is the URL of the external AI quality API. env: AI_QUALITY_API_ENDPOINT
-	APIEndpoint string
-	// APIKey is the bearer token used when calling the AI quality API. env: AI_QUALITY_API_KEY
-	APIKey string
-	// CheckIntervalMinutes controls how often the monitor polls (default 10). env: AI_QUALITY_CHECK_INTERVAL_MINUTES
-	CheckIntervalMinutes int
-	// AppProtocol is the protocol used to construct attachment fallback URLs (http/https). env: APP_PROTOCOL
-	AppProtocol string
-	// AppHost is the host:port of this server used to construct attachment fallback URLs. env: APP_HOST
-	AppHost string
-	// AppToken is an internal bearer token used when downloading attachments via the API fallback. env: APP_TOKEN
-	AppToken string
-}
-
-// NasaqConfig points at the standalone Nasaq Integration Microservice (see
-// Nasaq-Integration-Service repo) - this backend never calls Nasaq's own
-// APIs directly, only this internal service.
-type NasaqConfig struct {
-	// BaseURL is the Nasaq Integration Microservice's base URL. env: NASAQ_SERVICE_BASE_URL
-	BaseURL string
-	// APIKey is sent as the X-Api-Key header on every call. env: NASAQ_SERVICE_API_KEY
-	APIKey string
-	// TimeoutSeconds bounds each call to the microservice (default 20). env: NASAQ_SERVICE_TIMEOUT_SECONDS
-	TimeoutSeconds int
-}
-
-// AutoAssignConfig holds settings for the Auto-Assign Monitor.
-type AutoAssignConfig struct {
-	// StateCode is the workflow state code to scan for unassigned incidents. env: AUTO_ASSIGN_STATE_CODE
-	// Leave empty to disable the monitor entirely.
-	StateCode string
-	// IntervalMinutes controls how often the monitor sweeps (default 5). env: AUTO_ASSIGN_INTERVAL_MINUTES
-	IntervalMinutes int
-}
-
-type GoalManagementConfig struct {
-	Enabled bool // env: GOAL_MANAGEMENT
-}
-
 type DocumentaConfig struct {
 	BaseURL       string
 	ClientID      string
@@ -204,54 +126,11 @@ type DocumentaConfig struct {
 	Enabled       bool
 }
 
-// CintrixConfig holds settings for the Cintrix CTI integration (contact-center
-// softphone widget). env: CINTRIX_URL, CINTRIX_API_KEY_ID, CINTRIX_API_KEY_SECRET,
-// CINTRIX_WEBHOOK_SECRET.
-// CINTRIX_URL must be the Cintrix FRONTEND origin (its nginx serves
-// cti-widget.js and proxies /api to the backend) — NOT the bare backend port;
-// the widget script 404s there and the widget never renders.
-// — leaving these unset disables the CTI routes.
-// WebhookSecret authenticates inbound call-event webhooks from Cintrix
-// (Authorization: Bearer + X-Cintrix-Signature HMAC); leaving it unset
-// disables the webhook route (503).
-type CintrixConfig struct {
-	URL           string
-	APIKeyID      string
-	APIKeySecret  string
-	WebhookSecret string
-}
-
-// MOMRAConfig holds settings for the outbound MOMRA CRM integration (Automax acting as
-// a client of MOMRA's CRM services — status sync, classification/EE master sync).
-// This is the reverse direction from the existing inbound EPM routes in
-// epm_incident_handler.go, which is MOMRA/EPM pushing incidents into Automax.
-// env: MOMRA_BASE_URL, MOMRA_AUTH_SERVICE, MOMRA_AUTH_KEY, MOMRA_AMANA_ID.
-// Leaving BaseURL unset disables outbound MOMRA sync/status calls.
-type MOMRAConfig struct {
-	// BaseURL is the MOMRA host (scheme + host + port), shared by the token API
-	// (BaseURL + /API/Authentication/GetToken) and the CRM services
-	// (BaseURL + /api/crm940/...), e.g. https://eservicestest.eamana.gov.sa:450
-	BaseURL string
-	// AuthService and AuthKey are the GetToken request's "Service" and "Key"
-	// credentials issued by the client. Secrets — set via env, never commit.
-	AuthService string
-	AuthKey     string
-	// AmanaID is UpdateStatusV2's "AmanaID" (this Amana's code in MOMRA, e.g. "003").
-	AmanaID string
-}
-
 type EscalationConfig struct {
 	DailyHour    int
 	DailyMinute  int
 	WeeklyHour   int
 	WeeklyMinute int
-}
-
-// SmsFeedbackConfig controls the delayed SMS fallback sent when the WhatsApp chatbot
-// has not received a response within the configured window after a final-close transition.
-type SmsFeedbackConfig struct {
-	// DelayMinutes is how long to wait before sending the SMS fallback. env: SMS_FEEDBACK_DELAY_MINUTES (default: 2880)
-	DelayMinutes int
 }
 
 type ReadyToCloseConfig struct {
@@ -409,7 +288,7 @@ func Load() *Config {
 			Port:     getEnv("DB_PORT", "5432"),
 			User:     getEnv("DB_USER", "automax"),
 			Password: getEnv("DB_PASSWORD", "automax123"),
-			DBName:   getEnv("DB_NAME", "automax"),
+			DBName:   getEnv("DB_NAME", "Executive-office"),
 			SSLMode:  getEnv("DB_SSLMODE", "disable"),
 		},
 		Redis: RedisConfig{
@@ -495,46 +374,11 @@ func Load() *Config {
 			WorkspaceName: getEnv("DOCUMENTA_WORKSPACE_NAME", "automax"),
 			Enabled:       getEnvAsBool("DOCUMENTA_ENABLED", false),
 		},
-		// KpiDocumenta is a SEPARATE OAuth client/config from Documenta above —
-		// KPI evidence uploads intentionally use their own Documenta client
-		// (own credentials, own workspace) rather than sharing Goal
-		// Management's, per explicit product decision. Defaults to disabled
-		// (stub client, see cmd/server/main.go) until real credentials exist.
-		KpiDocumenta: DocumentaConfig{
-			BaseURL:       getEnv("KPI_DOCUMENTA_BASE_URL", "https://mydocs.axionic.io"),
-			ClientID:      getEnv("KPI_DOCUMENTA_CLIENT_ID", ""),
-			ClientSecret:  getEnv("KPI_DOCUMENTA_CLIENT_SECRET", ""),
-			WorkspaceName: getEnv("KPI_DOCUMENTA_WORKSPACE_NAME", "automax"),
-			Enabled:       getEnvAsBool("KPI_DOCUMENTA_ENABLED", false),
-		},
 		ReadyToClose: ReadyToCloseConfig{
 			DefaultDurationOptions:     getEnvAsStringSlice("READY_TO_CLOSE_DURATION_OPTIONS", []string{"1 Day", "2 Days", "1 Week", "2 Weeks", "1 Month", "3 Months"}),
 			PreExpiryNotificationHours: getEnvAsInt("READY_TO_CLOSE_PRE_EXPIRY_HOURS", 24),
 			RevertStateCode:            getEnv("READY_TO_CLOSE_REVERT_STATE_CODE", "under_resolution"),
 			StateCode:                  getEnv("READY_TO_CLOSE_STATE_CODE", "ready_to_close"),
-		},
-		AIQuality: AIQualityConfig{
-			APIEndpoint:          getEnv("AI_QUALITY_API_ENDPOINT", ""),
-			APIKey:               getEnv("AI_QUALITY_API_KEY", ""),
-			CheckIntervalMinutes: getEnvAsInt("AI_QUALITY_CHECK_INTERVAL_MINUTES", 10),
-			AppProtocol:          getEnv("APP_PROTOCOL", "http"),
-			AppHost:              getEnv("APP_HOST", "localhost:8080"),
-			AppToken:             getEnv("APP_TOKEN", ""),
-		},
-		Nasaq: NasaqConfig{
-			BaseURL:        getEnv("NASAQ_SERVICE_BASE_URL", ""),
-			APIKey:         getEnv("NASAQ_SERVICE_API_KEY", ""),
-			TimeoutSeconds: getEnvAsInt("NASAQ_SERVICE_TIMEOUT_SECONDS", 20),
-		},
-		FinalCloseWhatsAppFeedback: FinalCloseWhatsAppFeedbackConfig{
-			SessionBaseURL: getEnv("FINAL_CLOSE_WHATSAPP_FEEDBACK_SESSION_BASE_URL", ""),
-		},
-		AutoAssign: AutoAssignConfig{
-			StateCode:       getEnv("AUTO_ASSIGN_STATE_CODE", ""),
-			IntervalMinutes: getEnvAsInt("AUTO_ASSIGN_INTERVAL_MINUTES", 5),
-		},
-		GoalManagement: GoalManagementConfig{
-			Enabled: getEnvAsBool("GOAL_MANAGEMENT", false),
 		},
 		License: LicenseConfig{
 			EncryptionKey:     getEnv("LICENSE_ENCRYPTION_KEY", ""),
@@ -546,32 +390,12 @@ func Load() *Config {
 		Integration: IntegrationConfig{
 			SecretsKey: getEnv("INTEGRATION_SECRETS_KEY", ""),
 		},
-		SmsFeedback: SmsFeedbackConfig{
-			DelayMinutes: getEnvAsInt("SMS_FEEDBACK_DELAY_MINUTES", 0),
-		},
-		Cintrix: CintrixConfig{
-			URL:           getEnv("CINTRIX_URL", ""),
-			APIKeyID:      getEnv("CINTRIX_API_KEY_ID", ""),
-			APIKeySecret:  getEnv("CINTRIX_API_KEY_SECRET", ""),
-			WebhookSecret: getEnv("CINTRIX_WEBHOOK_SECRET", ""),
-		},
-		PBX: PBXConfig{
-			BaseURL:            getEnv("PBX_BASE_URL", "https://zkff.automaxsw.com/create_user.php"),
-			InsecureSkipVerify: getEnvAsBool("PBX_INSECURE_SKIP_VERIFY", false),
-		},
-		MOMRA: MOMRAConfig{
-			BaseURL:     getEnv("MOMRA_BASE_URL", ""),
-			AuthService: getEnv("MOMRA_AUTH_SERVICE", ""),
-			AuthKey:     getEnv("MOMRA_AUTH_KEY", ""),
-			AmanaID:     getEnv("MOMRA_AMANA_ID", "003"),
-		},
 		SyncDeptAttributesToUser:    getEnvAsBool("SYNC_DEPT_ATTRIBUTES_TO_USER", false),
 		MaxDescriptionLength:        getEnvAsInt("MAX_DESCRIPTION_LENGTH", 500),
 		ClientCode:                  getEnv("CLIENT_CODE", ""),
 		CitizenAttachmentSizeLimit:  getEnv("CITIZEN_ATTACHMENT_SIZE_LIMIT", "5242880"),
 		InternalAttachmentSizeLimit: getEnv("INTERNAL_ATTACHMENT_SIZE_LIMIT", "10485760"),
 		ChatbotURL:                  getEnv("CHATBOT_URL", "https://chatbot.automax.example.com"),
-		KpiDictionaryWorkflowCode:   getEnv("KPI_DICTIONARY_WORKFLOW_CODE", "kpi_dictionary_workflow"),
 		Geo: GeoConfig{
 			PostGISEnabled:                 getEnvAsBool("POSTGIS_ENABLED", false),
 			NearbyIncidentRadiusMeters:     getEnvAsFloat("NEARBY_INCIDENT_RADIUS_METERS", 1000),

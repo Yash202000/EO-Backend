@@ -30,12 +30,6 @@ var defaultSMSTemplates = []smsSeed{
 		Variables: `["otp"]`,
 	},
 	{
-		Code: "INCIDENT_REQUEST_INFO_SMS", Name: "Request additional info (citizen)", ModuleType: "incident",
-		BodyEN:    "Dear Beneficiary,\nPlease complete your incident details through the link below and fill in the required information to proceed with your request:\n{{sms_link}}\nThank you for your cooperation.",
-		BodyAR:    "عزيزي المستفيد،\nنأمل استكمال بيانات البلاغ عبر الرابط أدناه وتعبئة الحقول المطلوبة، وذلك لاستكمال معالجة البلاغ:\n{{sms_link}}\nشكرًا لتعاونكم.",
-		Variables: `["sms_link"]`,
-	},
-	{
 		Code: "INCIDENT_MERGE_CLOSED_SMS", Name: "Merged incident auto-closed", ModuleType: "incident",
 		BodyEN:    "Your incident {{incident_number}} has been automatically closed as it was merged with master incident {{master_incident_number}}. The master incident has been resolved.",
 		BodyAR:    "تم إغلاق بلاغك رقم {{incident_number}} تلقائيًا لدمجه مع البلاغ الرئيسي رقم {{master_incident_number}}. وقد تمت معالجة البلاغ الرئيسي.",
@@ -46,18 +40,6 @@ var defaultSMSTemplates = []smsSeed{
 		BodyEN:    "Your incident {{incident_number}} status has been updated to '{{to_state}}' (master incident: {{master_incident_number}}). Comment: {{comment}}",
 		BodyAR:    "تم تحديث حالة بلاغك رقم {{incident_number}} إلى '{{to_state}}' (البلاغ الرئيسي: {{master_incident_number}}). ملاحظة: {{comment}}",
 		Variables: `["incident_number","to_state","master_incident_number","comment"]`,
-	},
-	{
-		Code: "IVR_INCIDENT_CREATED_SMS", Name: "IVR incident created", ModuleType: "incident",
-		BodyEN:    "Thank you for contacting Eastern Province Municipality. Your incident {{incident_number}} has been created.",
-		BodyAR:    "شكرًا لتواصلكم مع أمانة المنطقة الشرقية. تم إنشاء بلاغكم رقم {{incident_number}}.",
-		Variables: `["incident_number"]`,
-	},
-	{
-		Code: "INCIDENT_FEEDBACK_REQUEST_SMS", Name: "Public feedback request", ModuleType: "incident",
-		BodyEN:    "Please rate your experience. Submit your feedback here: {{feedback_link}}",
-		BodyAR:    "نأمل تقييم تجربتكم عبر الرابط التالي: {{feedback_link}}",
-		Variables: `["feedback_link"]`,
 	},
 	{
 		Code: "INCIDENT_CLOSURE_NOT_BELONG_SMS", Name: "Closure: incident belongs to another department", ModuleType: "incident",

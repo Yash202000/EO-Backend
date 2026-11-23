@@ -2,8 +2,6 @@ package services
 
 import (
 	"fmt"
-
-	"github.com/automax/backend/internal/models"
 )
 
 // Arabic text builders for incident in-app notifications.
@@ -32,25 +30,6 @@ func PartialCloseExpiryTextsAr(incidentNumber, title, revertStateName, timeStr, 
 		revertStateName, timeStr, incidentNumber, title, expiresAt,
 	)
 	return
-}
-
-// extensionNotificationContentAr is the Arabic counterpart of extensionNotificationContent
-// (extension_service.go). targetName/prevName are the display names of the users involved.
-func extensionNotificationContentAr(action, extension, targetName, prevName string) (subject, body string) {
-	switch action {
-	case models.ExtensionActionCreate:
-		return "تم إنشاء تحويلة PBX جديدة",
-			fmt.Sprintf("تم إنشاء التحويلة %s وهي متاحة الآن للإسناد.", extension)
-	case models.ExtensionActionRelease:
-		return "تم تحرير تحويلة PBX",
-			fmt.Sprintf("تم تحرير التحويلة %s من %s وهي متاحة الآن.", extension, targetName)
-	case models.ExtensionActionTakeover:
-		return "تمت إعادة إسناد تحويلة PBX",
-			fmt.Sprintf("تمت إعادة إسناد التحويلة %s إلى %s (كانت مسندة سابقاً إلى %s).", extension, targetName, prevName)
-	default: // assign
-		return "تم إسناد تحويلة PBX",
-			fmt.Sprintf("تم إسناد التحويلة %s إلى %s.", extension, targetName)
-	}
 }
 
 // SimilarIncidentTexts builds the EN and AR in-app notification shown to the creator of a

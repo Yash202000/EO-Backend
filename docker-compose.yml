@@ -16,15 +16,15 @@ services:
   db:
     image: postgres:15
     restart: always
-    healthcheck: { test: ["CMD-SHELL", "pg_isready -U automax"], interval: 10s, timeout: 5s, retries: 5 }
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"], interval: 10s, timeout: 5s, retries: 5 }
     volumes:
       - automax_db:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: ${DB_USER:-automax}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-automax123}
-      POSTGRES_DB: ${DB_NAME:-automax}
+      POSTGRES_USER: ${DB_USER:?DB_USER must be set in .env}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set in .env}
+      POSTGRES_DB: ${DB_NAME:?DB_NAME must be set in .env}
 
   redis:
     image: redis:7-alpine
@@ -42,37 +42,37 @@ services:
     volumes:
       - automax_minio:/mnt/data
     environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY must be set in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY must be set in .env}
 
-  # backend:
-  #   image: yashplg/automax31-backend:v1.8.9
-  #   container_name: automax-backend
-  #   restart: always
-  #   ports:
-  #     - "8080:8080"
-  #   env_file:
-  #     - .env
-  #   environment:
-  #     DB_HOST: db
-  #     REDIS_HOST: redis
-  #     MINIO_ENDPOINT: minio:9000
-  #   depends_on:
-  #     db:
-  #       condition: service_healthy
-  #     redis:
-  #       condition: service_healthy
+  backend:
+    image: yashplg/eo-automax-backend:v1.0.0
+    container_name: eo-automax-backend
+    restart: always
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      REDIS_HOST: redis
+      MINIO_ENDPOINT: minio:9000
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
-  # frontend:
-  #   image: yashplg/automax31-frontend:v1.8.9.2
-  #   container_name: automax-frontend
-  #   restart: always
-  #   ports:
-  #     - "3000:3000"
-  #   env_file:
-  #     - .env
-  #   depends_on:
-  #     - backend
+  frontend:
+    image: yashplg/eo-automax-frontend:v1.0.0
+    container_name: eo-automax-frontend
+    restart: always
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    depends_on:
+      - backend
 
 volumes:
   automax_db:

@@ -127,7 +127,6 @@ func (h *IntegrationUserHandler) CreateUser(c *fiber.Ctx) error {
 		FirstName:         req.FirstName,
 		LastName:          req.LastName,
 		Phone:             req.Phone,
-		Extension:         req.Extension,
 		RoleIDs:           roleIDs,
 		DepartmentIDs:     departmentIDs,
 		LocationIDs:       locationIDs,

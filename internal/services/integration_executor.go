@@ -346,7 +346,6 @@ func (e *integrationExecutor) buildIncidentContext(incident *models.Incident, fi
 		ctx["reporter_username"] = incident.Reporter.Username
 		ctx["reporter_first_name"] = incident.Reporter.FirstName
 		ctx["reporter_last_name"] = incident.Reporter.LastName
-		ctx["reporter_extension"] = incident.Reporter.Extension
 	}
 	if incident.SourceIncidentID != nil {
 		ctx["source_incident_id"] = incident.SourceIncidentID.String()

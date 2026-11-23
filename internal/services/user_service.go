@@ -46,17 +46,13 @@ type UserService interface {
 	UpdateAvatar(ctx context.Context, userID uuid.UUID, avatarURL string) error
 	DeleteUser(ctx context.Context) error
 	AdminDeleteUser(ctx context.Context, userID uuid.UUID) error
-	ListUsers(ctx context.Context, page, limit int, search, phone, extension, callStatus string, roleIDs, departmentIDs, locationIDs, classificationIDs []uuid.UUID, withIncident, withIVR bool, strictDepartment ...bool) ([]models.UserResponse, int64, error)
+	ListUsers(ctx context.Context, page, limit int, search, phone string, roleIDs, departmentIDs, locationIDs, classificationIDs []uuid.UUID, withIncident, withIVR bool, strictDepartment ...bool) ([]models.UserResponse, int64, error)
 	GetUserByID(ctx context.Context, userID uuid.UUID) (*models.UserResponse, error)
 	GetUserByEmail(ctx context.Context, email string) (*models.User, error)
 	GetUserByMobile(ctx context.Context, phone string) (*models.User, error)
 	GetUserByUsername(ctx context.Context, username string) (*models.User, error)
 	CheckExistingIdentifiers(ctx context.Context, emails, usernames, phones []string) (*models.ExistingUserIdentifiers, error)
 	FindMatchingUsers(ctx context.Context, roleIDs []uuid.UUID, classificationID, locationID, departmentID, excludeUserID *uuid.UUID) ([]models.UserResponse, error)
-	UpdateUserCallStatus(ctx context.Context, extension string, status string) (interface{}, error)
-	FindByExtension(ctx context.Context, extension string) (*models.User, error)
-	FindByExtOrPhone(ctx context.Context, phone string) (*models.User, error)
-	FindByExtOrPhoneList(ctx context.Context, phones []string) ([]models.User, error)
 	UpdateProfile(ctx context.Context, req *models.UserUpdateRequest) (*models.UserResponse, error)
 	GenerateTokenViaUserID(ctx context.Context, mobile uuid.UUID) (*models.AuthResponse, error)
 	ValidateMobileForLogin(ctx context.Context, phone string) (*models.UserResponse, error)
@@ -189,7 +185,6 @@ func (s *userService) Register(ctx context.Context, req *models.UserRegisterRequ
 		LastName:        req.LastName,
 		Phone:           req.Phone,
 		AlternateMobile: req.AlternateMobile,
-		Extension:       req.Extension,
 		DepartmentID:    req.DepartmentID,
 		LocationID:      req.LocationID,
 		IsActive:        true,
@@ -271,25 +266,6 @@ func (s *userService) Register(ctx context.Context, req *models.UserRegisterRequ
 	// appends their locations/classifications — covers the fast-save race condition.
 	if len(req.DepartmentIDs) > 0 && s.config.SyncDeptAttributesToUser {
 		_ = s.syncDepartmentAttributesToUser(ctx, user.ID, nil, req.DepartmentIDs)
-	}
-
-	// Assign extension if provided
-	if req.Extension != "" {
-		actorID, _ := ctx.Value(constants.ContextKeys.UserID).(uuid.UUID)
-		assignment := &models.ExtensionAssignment{
-			Extension:  req.Extension,
-			UserID:     user.ID,
-			AssignedBy: actorID,
-		}
-		if err := s.db.WithContext(ctx).Create(assignment).Error; err != nil {
-			return nil, fmt.Errorf("%s: %w", i18n.T(ctx, "failed_to_assign_extension"), err)
-		}
-		s.db.WithContext(ctx).Create(&models.ExtensionAssignmentHistory{
-			Extension:  req.Extension,
-			UserID:     &user.ID,
-			AssignedBy: actorID,
-			Action:     models.ExtensionActionAssign,
-		})
 	}
 
 	// Get user's primary role for JWT (use "user" as default)
@@ -389,7 +365,6 @@ func (s *userService) SSORegister(ctx context.Context, req *models.SSORegisterRe
 		MiddleName:   req.MiddleName,
 		LastName:     req.LastName,
 		Phone:        req.Phone,
-		Extension:    req.Extension,
 		DepartmentID: req.DepartmentID,
 		LocationID:   req.LocationID,
 		IsActive:     true,
@@ -971,7 +946,6 @@ func (s *userService) GenerateTokenViaUserID(ctx context.Context, userID uuid.UU
 		FirstName:    user.FirstName,
 		LastName:     user.LastName,
 		Phone:        user.Phone,
-		Extension:    user.Extension,
 		DepartmentID: user.DepartmentID,
 		LocationID:   user.LocationID,
 		IsActive:     user.IsActive,
@@ -1006,7 +980,6 @@ func (s *userService) UpdateAdminProfile(ctx context.Context, userID uuid.UUID, 
 	// IMPORTANT: Create COPIES of values, not pointers to mutable fields
 	oldIsActive := user.IsActive
 	oldMobileVerified := user.MobileVerified
-	oldExtension := user.Extension // Copy the extension value
 	oldUser := &models.UserUpdateRequest{
 		FirstName:         user.FirstName,
 		MiddleName:        user.MiddleName,
@@ -1014,7 +987,6 @@ func (s *userService) UpdateAdminProfile(ctx context.Context, userID uuid.UUID, 
 		Username:          user.Username,
 		Phone:             user.Phone,
 		AlternateMobile:   user.AlternateMobile,
-		Extension:         &oldExtension, // Pointer to the copy, not the original
 		DepartmentID:      user.DepartmentID,
 		LocationID:        user.LocationID,
 		IsActive:          &oldIsActive,       // Pointer to the copy
@@ -1033,7 +1005,6 @@ func (s *userService) UpdateAdminProfile(ctx context.Context, userID uuid.UUID, 
 		"username":         user.Username,
 		"phone":            user.Phone,
 		"alternate_mobile": user.AlternateMobile,
-		"extension":        user.Extension,
 		"mobile_verified":  user.MobileVerified,
 		"is_active":        oldIsActive,
 		"is_ad_user":       user.IsADUser,
@@ -1149,9 +1120,6 @@ func (s *userService) UpdateAdminProfile(ctx context.Context, userID uuid.UUID, 
 		user.DeptManagerLocationID = req.DeptManagerLocationID
 	}
 
-	if req.Extension != nil {
-		user.Extension = *req.Extension
-	}
 	if req.BypassLoginTotp != nil {
 		user.BypassLoginTotp = *req.BypassLoginTotp
 	}
@@ -1282,9 +1250,6 @@ func (s *userService) UpdateAdminProfile(ctx context.Context, userID uuid.UUID, 
 		"alternate_mobile": req.AlternateMobile,
 	}
 
-	if req.Extension != nil {
-		newUserForLogging["extension"] = *req.Extension
-	}
 	if req.MobileVerified != nil {
 		newUserForLogging["mobile_verified"] = *req.MobileVerified
 	}
@@ -1369,9 +1334,6 @@ func (s *userService) UpdateAdminProfile(ctx context.Context, userID uuid.UUID, 
 		}
 		if req.AlternateMobile != "" && req.AlternateMobile != user.AlternateMobile {
 			changedFields = append(changedFields, "alternate_mobile")
-		}
-		if req.Extension != nil && *req.Extension != user.Extension {
-			changedFields = append(changedFields, "extension")
 		}
 		if req.MobileVerified != nil && *req.MobileVerified != user.MobileVerified {
 			if *req.MobileVerified {
@@ -1492,7 +1454,6 @@ func (s *userService) UpdateProfile(ctx context.Context, req *models.UserUpdateR
 	}
 
 	// Create COPIES of values before they get modified
-	oldExtension := user.Extension
 	oldMobileVerified := user.MobileVerified
 
 	oldUser := &models.UserUpdateRequest{
@@ -1500,7 +1461,6 @@ func (s *userService) UpdateProfile(ctx context.Context, req *models.UserUpdateR
 		MiddleName:     user.MiddleName,
 		LastName:       user.LastName,
 		Phone:          user.Phone,
-		Extension:      &oldExtension,      // Pointer to the copy
 		MobileVerified: &oldMobileVerified, // Pointer to the copy
 	}
 
@@ -1541,9 +1501,6 @@ func (s *userService) UpdateProfile(ctx context.Context, req *models.UserUpdateR
 		user.MobileVerified = *req.MobileVerified
 		update["mobile_verified"] = req.MobileVerified
 	}
-
-	// Extension is no longer stored on users — it is managed only via the extensions
-	// API (extension_assignments table). Any req.Extension here is ignored.
 
 	if req.Username != "" && req.Username != user.Username {
 		exists, err := s.userRepo.ExistsByUsername(ctx, req.Username)
@@ -1591,9 +1548,6 @@ func (s *userService) UpdateProfile(ctx context.Context, req *models.UserUpdateR
 		}
 		if req.Phone != "" && req.Phone != user.Phone {
 			changedFields = append(changedFields, "phone")
-		}
-		if req.Extension != nil && *req.Extension != user.Extension {
-			changedFields = append(changedFields, "extension")
 		}
 		if req.MobileVerified != nil && *req.MobileVerified != user.MobileVerified {
 			if *req.MobileVerified {
@@ -2003,8 +1957,8 @@ func (s *userService) AdminDeleteUser(ctx context.Context, userID uuid.UUID) err
 	return err
 }
 
-func (s *userService) ListUsers(ctx context.Context, page, limit int, search, phone, extension, callStatus string, roleIDs, departmentIDs, locationIDs, classificationIDs []uuid.UUID, withIncident, withIVR bool, strictDepartment ...bool) ([]models.UserResponse, int64, error) {
-	users, total, err := s.userRepo.List(ctx, page, limit, search, phone, extension, callStatus, roleIDs, departmentIDs, locationIDs, classificationIDs, withIncident, withIVR, strictDepartment...)
+func (s *userService) ListUsers(ctx context.Context, page, limit int, search, phone string, roleIDs, departmentIDs, locationIDs, classificationIDs []uuid.UUID, withIncident, withIVR bool, strictDepartment ...bool) ([]models.UserResponse, int64, error) {
+	users, total, err := s.userRepo.List(ctx, page, limit, search, phone, roleIDs, departmentIDs, locationIDs, classificationIDs, withIncident, withIVR, strictDepartment...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -2041,82 +1995,11 @@ func (s *userService) FindMatchingUsers(ctx context.Context, roleIDs []uuid.UUID
 	return responses, nil
 }
 
-func (s *userService) UpdateUserCallStatus(ctx context.Context, extension string, status string) (interface{}, error) {
-	// The status endpoint exposes "available" as the ready-for-work state, but
-	// round-robin (FindMatchingOnline) matches call_status = 'online'. Map the
-	// client vocabulary onto the persisted enum so status drives assignment.
-	if strings.EqualFold(status, "available") {
-		status = string(models.CallStatusOnline) // "online"
-	}
-
-	//Setup cache key
-	cacheKey := fmt.Sprintf("USER_CALL_STATUS:%s", extension)
-	var cachedStatus map[string]interface{}
-
-	err := s.sessionStore.Get(ctx, cacheKey, &cachedStatus)
-	if err == nil {
-		if st, ok := cachedStatus["call_status"].(string); ok && st == status {
-			return cachedStatus, nil
-		}
-	}
-
-	// Fetch User from DB
-	user, err := s.userRepo.FindByExtension(ctx, extension)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", i18n.Tf(ctx, "user_extension_not_found", extension), err)
-	}
-
-	// Update DB if status is different. Use UpdateProfile (targeted map update)
-	// because the generic Update method omits call_status from its field list,
-	// so it would never persist the column that round-robin reads.
-	if string(user.CallStatus) != status {
-		if err := s.userRepo.UpdateProfile(ctx, map[string]interface{}{
-			"id":          user.ID,
-			"call_status": status,
-		}); err != nil {
-			return nil, err
-		}
-		user.CallStatus = models.CallStatus(status) // reflect new value in the response
-	}
-
-	// Prepare Response
-	result := map[string]interface{}{
-		"id":          user.ID,
-		"extension":   user.Extension,
-		"call_status": user.CallStatus,
-		"updated_at":  user.UpdatedAt,
-	}
-
-	//  Update Cache
-	err = s.sessionStore.Set(ctx, cacheKey, result, 15*time.Minute)
-	if err != nil {
-		fmt.Printf("Failed to update cache: %v\n", err)
-	}
-
-	return result, nil
-}
-
 // Helper to keep code clean
 func (s *userService) updateStatusCache(ctx context.Context, key string, data interface{}) {
 	if bytes, err := json.Marshal(data); err == nil {
 		_ = s.sessionStore.Set(ctx, key, string(bytes), 15*time.Minute)
 	}
-}
-
-func (s *userService) FindByExtension(ctx context.Context, extension string) (*models.User, error) {
-	user, err := s.userRepo.FindByExtension(ctx, extension)
-	if err != nil {
-		return nil, err
-	}
-	return user, nil
-}
-
-func (s *userService) FindByExtOrPhone(ctx context.Context, phone string) (*models.User, error) {
-	return s.userRepo.FindByExtOrPhone(ctx, phone)
-}
-
-func (s *userService) FindByExtOrPhoneList(ctx context.Context, phones []string) ([]models.User, error) {
-	return s.userRepo.FindByExtOrPhoneList(ctx, phones)
 }
 
 func (s *userService) GetUserByEmail(ctx context.Context, email string) (*models.User, error) {

@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/automax/backend/internal/config"
@@ -28,8 +27,8 @@ type NotificationService struct {
 	storage *storage.MinIOStorage
 	cfg     *config.Config
 
-	amanaOnce sync.Once
-	amana     SMSTemplateSender
+	// amana is the SMS provider; nil until an EO SMS gateway is wired in with SetSMSSender.
+	amana SMSTemplateSender
 }
 
 // smsVariableOrder is the Amana Variables[] order: the template's variables column wins,
@@ -94,6 +93,11 @@ type smsAudit struct {
 	Response   string
 }
 
+// SetSMSSender wires in the SMS provider used for the "sms" channel.
+func (s *NotificationService) SetSMSSender(sender SMSTemplateSender) {
+	s.amana = sender
+}
+
 // sendAmanaSMS validates and sends one template-based SMS through Amana.
 // The audit is filled as far as the call got, also on failure.
 func (s *NotificationService) sendAmanaSMS(ctx context.Context, phone, providerTemplateID string, varNames []string, variables map[string]string) (string, smsAudit, error) {
@@ -117,7 +121,10 @@ func (s *NotificationService) sendAmanaSMS(ctx context.Context, phone, providerT
 	audit.Variables = values
 	audit.Names = append([]string(nil), varNames...)
 	log.Printf("[SMS] provider=amana stage=validate OK %s to=%s template_id=%d variable_order=%v", tag, maskMobile(mobile), templateID, varNames)
-	s.amanaOnce.Do(func() { s.amana = NewAmanaSMSSender(s.cfg.MOMRA) })
+	if s.amana == nil {
+		log.Printf("[SMS] stage=send FAILED %s no SMS provider configured", tag)
+		return "", audit, fmt.Errorf("no SMS provider configured")
+	}
 	res, err := s.amana.SendSMSByTemplateIDDetailed(ctx, mobile, templateID, values)
 	if res != nil {
 		audit.StatusCode, audit.Response = res.StatusCode, res.Response
@@ -215,18 +222,15 @@ func (s *NotificationService) SendNotification(ctx context.Context, channel stri
 			// Use whichever body is set. When the requested language has content, prefer it;
 			// otherwise use whichever variant is non-empty so the template always sends.
 			var tplBody, tplSubject string
-			tplLang := "ar"
 			if language == "ar" && tpl.BodyAR != "" {
 				tplBody = tpl.BodyAR
 				tplSubject = tpl.SubjectAR
 			} else if language != "ar" && tpl.BodyEN != "" {
 				tplBody = tpl.BodyEN
 				tplSubject = tpl.SubjectEN
-				tplLang = "en"
 			} else if tpl.BodyEN != "" {
 				tplBody = tpl.BodyEN
 				tplSubject = tpl.SubjectEN
-				tplLang = "en"
 			} else if tpl.BodyAR != "" {
 				tplBody = tpl.BodyAR
 				tplSubject = tpl.SubjectAR
@@ -241,12 +245,6 @@ func (s *NotificationService) SendNotification(ctx context.Context, channel stri
 				}
 				smsVarNames, _ = smsVariableOrder(tpl.Variables, tplBody)
 				log.Printf("[SMS] stage=route template=%q → amana provider_template_id=%s variable_order=%v", *templateCode, smsProviderTplID, smsVarNames)
-			}
-
-			// The citizen report link follows the language of the template body actually used
-			// (not the action's language setting, which may differ when a body is missing).
-			if (channel == "sms" || channel == "email") && variables != nil {
-				LocalizeReportVars(variables, tplLang)
 			}
 
 			if len(variables) > 0 {
@@ -1315,24 +1313,4 @@ func RenderTemplate(tpl string, vars map[string]string) (string, error) {
 	}
 
 	return result, nil
-}
-
-// TemplateUsesReportLink reports whether the template (any language, subject or body)
-// contains the citizen report variables {{report_url}} / {{report_link}}.
-func (s *NotificationService) TemplateUsesReportLink(ctx context.Context, templateCode, channel string) bool {
-	tpl, err := s.templateRepo.FindByCode(ctx, templateCode, channel)
-	if err != nil || tpl == nil {
-		return false
-	}
-	return containsReportVar(tpl.BodyEN, tpl.BodyAR, tpl.SubjectEN, tpl.SubjectAR)
-}
-
-func containsReportVar(texts ...string) bool {
-	for _, t := range texts {
-		l := strings.ToLower(t)
-		if strings.Contains(l, "{{report_url}}") || strings.Contains(l, "{{report_link}}") {
-			return true
-		}
-	}
-	return false
 }

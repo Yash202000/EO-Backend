@@ -22,20 +22,18 @@ type ActionExecutor interface {
 }
 
 type actionExecutor struct {
-	incidentRepo           repository.IncidentRepository
-	userRepo               repository.UserRepository
-	notificationService    *NotificationService
-	smsFeedbackPendingRepo repository.SmsFeedbackPendingRepository
-	httpClient             *http.Client
+	incidentRepo        repository.IncidentRepository
+	userRepo            repository.UserRepository
+	notificationService *NotificationService
+	httpClient          *http.Client
 }
 
 // NewActionExecutor creates a new action executor
-func NewActionExecutor(incidentRepo repository.IncidentRepository, userRepo repository.UserRepository, notificationService *NotificationService, smsFeedbackPendingRepo repository.SmsFeedbackPendingRepository) ActionExecutor {
+func NewActionExecutor(incidentRepo repository.IncidentRepository, userRepo repository.UserRepository, notificationService *NotificationService) ActionExecutor {
 	return &actionExecutor{
-		incidentRepo:           incidentRepo,
-		userRepo:               userRepo,
-		notificationService:    notificationService,
-		smsFeedbackPendingRepo: smsFeedbackPendingRepo,
+		incidentRepo:        incidentRepo,
+		userRepo:            userRepo,
+		notificationService: notificationService,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -89,34 +87,14 @@ func (e *actionExecutor) ExecuteAction(ctx context.Context, action *models.Trans
 	case "email":
 		return e.executeEmail(ctx, action, incident, transition, performedBy)
 	case "sms":
-		// On final-close, only "caller" recipient SMS is deferred to the SLA monitor
-		// (sent only if WhatsApp chatbot receives no response within the delay window).
-		// All other recipients (assignee, reporter, creator, custom, etc.) send immediately.
-		if transition != nil && transition.IsFinalClose && hasCallerRecipient(action) {
-			log.Printf("[ActionExecutor] incident=%s action=%q — caller SMS deferred (IsFinalClose), WhatsApp window active",
-				incident.IncidentNumber, action.Name)
-			if e.smsFeedbackPendingRepo == nil {
-				log.Printf("[SMS] flow=action: incident=%s action=%q — caller SMS deferred but smsFeedbackPendingRepo is nil, SMS will NOT be sent", incident.IncidentNumber, action.Name)
-			}
-			if e.smsFeedbackPendingRepo != nil {
-				var cfg SmsConfig
-				if err := json.Unmarshal([]byte(action.Config), &cfg); err == nil && cfg.TemplateCode != "" {
-					lang := cfg.Language
-					if lang == "" {
-						lang = "ar"
-					}
-					if err := e.smsFeedbackPendingRepo.SetTemplateCode(ctx, incident.ID, cfg.TemplateCode, lang); err != nil {
-						log.Printf("[ActionExecutor] incident=%s — failed to set template_code on pending SMS record: %v", incident.IncidentNumber, err)
-					}
-				}
-			}
-			return nil
-		}
 		return e.executeSms(ctx, action, incident, transition, performedBy)
 	case "webhook":
 		return e.executeWebhook(ctx, action, incident, transition, performedBy)
 	case "field_update":
 		return e.executeFieldUpdate(ctx, action, incident)
+	case models.ActionCreateLinked:
+		// Ticket POC: runs inside the transition transaction (see RunCreateLinkedActions).
+		return nil
 	default:
 		return fmt.Errorf("unknown action type: %s", action.ActionType)
 	}
@@ -241,14 +219,6 @@ func (e *actionExecutor) executeEmail(ctx context.Context, action *models.Transi
 		sentByID = &performedBy.ID
 	}
 
-	// Report link is sent once per closure per channel.
-	sendsReportLink := e.sendsReportLink(ctx, config.TemplateCode, "email", subject, body)
-	if sendsReportLink && incident.ReportLinkEmailSentAt != nil {
-		log.Printf("[EMAIL-ACTION] transition=%q incident=%s — report link email already sent at %s, skipping",
-			transitionName, incident.IncidentNumber, incident.ReportLinkEmailSentAt.Format(time.RFC3339))
-		return nil
-	}
-
 	result, err := e.notificationService.SendNotification(
 		ctx, "email", templateCode, lang,
 		emails, nil, nil,
@@ -265,11 +235,6 @@ func (e *actionExecutor) executeEmail(ctx context.Context, action *models.Transi
 	}
 	log.Printf("[EMAIL-ACTION] transition=%q incident=%s emails=%v template=%q — SENT OK",
 		transitionName, incident.IncidentNumber, emails, config.TemplateCode)
-	if sendsReportLink {
-		if err := e.incidentRepo.UpdateFields(ctx, incident.ID, map[string]interface{}{"report_link_email_sent_at": time.Now()}); err != nil {
-			log.Printf("[EMAIL-ACTION] incident=%s — failed to record report link email sent: %v", incident.IncidentNumber, err)
-		}
-	}
 	return nil
 }
 
@@ -345,14 +310,6 @@ func (e *actionExecutor) executeSms(ctx context.Context, action *models.Transiti
 		smsSentByID = &performedBy.ID
 	}
 
-	// Report link is sent once per closure per channel.
-	sendsReportLink := e.sendsReportLink(ctx, config.TemplateCode, "sms")
-	if sendsReportLink && incident.ReportLinkSMSSentAt != nil {
-		log.Printf("[SMS] flow=action: transition=%q incident=%s — report link SMS already sent at %s, skipping",
-			transitionName, incident.IncidentNumber, incident.ReportLinkSMSSentAt.Format(time.RFC3339))
-		return nil
-	}
-
 	result, err := e.notificationService.SendNotification(
 		ctx, "sms", templateCode, lang,
 		phones, nil, nil,
@@ -369,11 +326,6 @@ func (e *actionExecutor) executeSms(ctx context.Context, action *models.Transiti
 	}
 	log.Printf("[SMS] flow=action: transition=%q incident=%s phones=%v template=%q — SENT OK",
 		transitionName, incident.IncidentNumber, maskPhones(phones), config.TemplateCode)
-	if sendsReportLink {
-		if err := e.incidentRepo.UpdateFields(ctx, incident.ID, map[string]interface{}{"report_link_sms_sent_at": time.Now()}); err != nil {
-			log.Printf("[SMS] flow=action: incident=%s — failed to record report link SMS sent: %v", incident.IncidentNumber, err)
-		}
-	}
 	return nil
 }
 
@@ -752,13 +704,4 @@ func extractPreviousAssigneeID(history []models.IncidentTransitionHistory) uuid.
 		}
 	}
 	return uuid.Nil
-}
-
-// sendsReportLink reports whether the notification carries the citizen report link: the
-// template's text when a template is used, otherwise the inline texts.
-func (e *actionExecutor) sendsReportLink(ctx context.Context, templateCode, channel string, inlineTexts ...string) bool {
-	if templateCode != "" {
-		return e.notificationService.TemplateUsesReportLink(ctx, templateCode, channel)
-	}
-	return containsReportVar(inlineTexts...)
 }

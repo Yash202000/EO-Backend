@@ -87,8 +87,6 @@ func (h *ClassificationHandler) Create(c *fiber.Ctx) error {
 	}
 
 	// A newly created classification has no children yet, so it is always a leaf and
-	// is_nasaq may be honored as submitted; defaults to false when not provided.
-	isNasaq := req.IsNasaq != nil && *req.IsNasaq
 
 	classification := &models.Classification{
 		Name:          req.Name,
@@ -99,7 +97,6 @@ func (h *ClassificationHandler) Create(c *fiber.Ctx) error {
 		ParentID:      req.ParentID,
 		SortOrder:     req.SortOrder,
 		IsActive:      true,
-		IsNasaq:       isNasaq,
 	}
 
 	if err := h.repo.Create(c.UserContext(), classification); err != nil {
@@ -218,18 +215,6 @@ func (h *ClassificationHandler) Update(c *fiber.Ctx) error {
 			}
 		}
 		classification.IsActive = *req.IsActive
-	}
-	if req.IsNasaq != nil {
-		if *req.IsNasaq {
-			childCount, err := h.repo.CountChildren(c.UserContext(), id)
-			if err != nil {
-				return utils.InternalErrorResponse(c, err, i18n.T(c.UserContext(), "internal_server_error"))
-			}
-			if childCount > 0 {
-				return utils.ErrorResponse(c, fiber.StatusBadRequest, i18n.T(c.UserContext(), "classification_nasaq_requires_leaf"))
-			}
-		}
-		classification.IsNasaq = *req.IsNasaq
 	}
 	if req.SortOrder >= 0 {
 		classification.SortOrder = req.SortOrder
@@ -480,7 +465,6 @@ func (h *ClassificationHandler) Export(c *fiber.Ctx) error {
 			"level":       cls.Level,
 			"path":        cls.Path,
 			"is_active":   cls.IsActive,
-			"is_nasaq":    cls.IsNasaq,
 			"sort_order":  cls.SortOrder,
 		}
 	}
@@ -515,7 +499,6 @@ func (h *ClassificationHandler) Import(c *fiber.Ctx) error {
 		Level         int        `json:"level"`
 		Path          string     `json:"path"`
 		IsActive      bool       `json:"is_active"`
-		IsNasaq       bool       `json:"is_nasaq"`
 		SortOrder     int        `json:"sort_order"`
 		Criticalities []struct {
 			CriticalityID      uuid.UUID  `json:"criticality_id"`
@@ -598,7 +581,6 @@ func (h *ClassificationHandler) Import(c *fiber.Ctx) error {
 			Types:         typeRecords,
 			ParentID:      data.ParentID,
 			IsActive:      data.IsActive,
-			IsNasaq:       data.IsNasaq,
 			SortOrder:     data.SortOrder,
 		}
 		if !isEPM940 {

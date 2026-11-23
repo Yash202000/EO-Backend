@@ -6,3 +6,13 @@
 .idea
 .vscode
 tmp
+
+# Prebuilt binaries in the repo root (~75 MB) — the image builds its own
+/main
+/server
+
+# Design docs, PDFs and local secrets never go into the image
+docs
+*.pdf
+*firebase*.json
+*.pem

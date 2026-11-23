@@ -8,15 +8,6 @@ import (
 	"gorm.io/gorm"
 )
 
-type CallStatus string
-
-const (
-	CallStatusOffline CallStatus = "offline"
-	CallStatusOnline  CallStatus = "online"
-	CallStatusBusy    CallStatus = "busy"
-	CallStatusInCall  CallStatus = "in_call"
-)
-
 type User struct {
 	ID                          uuid.UUID        `gorm:"type:uuid;primary_key" json:"id"`
 	NationalID                  string           `gorm:"not null;default:''" json:"national_id"`
@@ -49,32 +40,15 @@ type User struct {
 	DeptManagerClassification   *Classification  `gorm:"foreignKey:DeptManagerClassificationID" json:"dept_manager_classification,omitempty"`
 	DeptManagerLocationID       *uuid.UUID       `gorm:"type:uuid;index" json:"dept_manager_location_id,omitempty"`
 	DeptManagerLocation         *Location        `gorm:"foreignKey:DeptManagerLocationID" json:"dept_manager_location,omitempty"`
-	// Extension is transient (no DB column): the current PBX extension lives in the
-	// extension_assignments table. It is populated from CurrentExtension by AfterFind
-	// so API responses keep exposing it. Managed only via the extensions API.
-	Extension string `gorm:"-" json:"extension"`
-	// CurrentExtension is the user's current extension assignment (if any). Preload it
-	// to populate Extension on read.
-	CurrentExtension *ExtensionAssignment `gorm:"foreignKey:UserID" json:"-"`
-	CallStatus       CallStatus           `gorm:"type:user_call_status;default:offline" json:"call_status"`
-	LastLoginAt      *time.Time           `json:"last_login_at"`
-	CreatedAt        time.Time            `json:"created_at"`
-	UpdatedAt        time.Time            `json:"updated_at"`
-	DeletedAt        gorm.DeletedAt       `gorm:"index" json:"-"`
+	LastLoginAt                 *time.Time       `json:"last_login_at"`
+	CreatedAt                   time.Time        `json:"created_at"`
+	UpdatedAt                   time.Time        `json:"updated_at"`
+	DeletedAt                   gorm.DeletedAt   `gorm:"index" json:"-"`
 }
 
 func (u *User) BeforeCreate(tx *gorm.DB) error {
 	if u.ID == uuid.Nil {
 		u.ID = uuid.New()
-	}
-	return nil
-}
-
-// AfterFind copies the preloaded current extension onto the transient Extension
-// field so serialized responses continue to include it.
-func (u *User) AfterFind(tx *gorm.DB) error {
-	if u.CurrentExtension != nil {
-		u.Extension = u.CurrentExtension.Extension
 	}
 	return nil
 }
@@ -209,7 +183,6 @@ type UserRegisterRequest struct {
 	LastName          string      `json:"last_name" validate:"max=100"`
 	Phone             string      `json:"phone" validate:"omitempty,mobile,max=20"`
 	AlternateMobile   string      `json:"alternate_mobile" validate:"omitempty,mobile,max=20"`
-	Extension         string      `json:"extension" validate:"max=20"`
 	DepartmentID      *uuid.UUID  `json:"department_id"`
 	LocationID        *uuid.UUID  `json:"location_id"`
 	DepartmentIDs     []uuid.UUID `json:"department_ids"`
@@ -331,7 +304,6 @@ type SSORegisterRequest struct {
 	MiddleName        string      `json:"middle_name" validate:"max=100"`
 	LastName          string      `json:"last_name" validate:"max=100"`
 	Phone             string      `json:"phone" validate:"required,max=20"`
-	Extension         string      `json:"extension" validate:"max=20"`
 	DepartmentID      *uuid.UUID  `json:"department_id"`
 	LocationID        *uuid.UUID  `json:"location_id"`
 	DepartmentIDs     []uuid.UUID `json:"department_ids"`
@@ -352,7 +324,6 @@ type UserUpdateRequest struct {
 	Phone                       string      `json:"phone" validate:"omitempty,mobile,max=20"`
 	AlternateMobile             string      `json:"alternate_mobile" validate:"omitempty,mobile,max=20"`
 	MobileVerified              *bool       `json:"mobile_verified"`
-	Extension                   *string     `json:"extension" validate:"omitempty,max=20"`
 	DepartmentID                *uuid.UUID  `json:"department_id"`
 	LocationID                  *uuid.UUID  `json:"location_id"`
 	DepartmentIDs               []uuid.UUID `json:"department_ids"`
@@ -403,8 +374,6 @@ type UserResponse struct {
 	DeptManagerClassification   *ClassificationResponse  `json:"dept_manager_classification,omitempty"`
 	DeptManagerLocationID       *uuid.UUID               `json:"dept_manager_location_id,omitempty"`
 	DeptManagerLocation         *LocationResponse        `json:"dept_manager_location,omitempty"`
-	Extension                   string                   `json:"extension"`
-	CallStatus                  string                   `json:"call_status"`
 	LastLoginAt                 *time.Time               `json:"last_login_at"`
 	CreatedAt                   time.Time                `json:"created_at"`
 }
@@ -448,8 +417,6 @@ type UserLoginResponse struct {
 	IsActive       bool                `json:"is_active"`
 	IsSuperAdmin   bool                `json:"is_super_admin"`
 	IsADUser       bool                `json:"is_ad_user"`
-	Extension      string              `json:"extension"`
-	CallStatus     string              `json:"call_status"`
 	LastLoginAt    *time.Time          `json:"last_login_at"`
 	CreatedAt      time.Time           `json:"created_at"`
 }
@@ -517,8 +484,6 @@ func ToUserLoginResponse(user *User) UserLoginResponse {
 		IsActive:       user.IsActive,
 		IsSuperAdmin:   user.IsSuperAdmin,
 		IsADUser:       user.IsADUser,
-		Extension:      user.Extension,
-		CallStatus:     string(user.CallStatus),
 		LastLoginAt:    user.LastLoginAt,
 		CreatedAt:      user.CreatedAt,
 		Permissions:    user.GetPermissions(),
@@ -552,8 +517,6 @@ func ToUserResponse(user *User) UserResponse {
 		IsADUser:        user.IsADUser,
 		BypassLoginTotp: user.BypassLoginTotp,
 		EnableLoginTotp: user.EnableLoginTotp,
-		Extension:       user.Extension,
-		CallStatus:      string(user.CallStatus),
 		LastLoginAt:     user.LastLoginAt,
 		CreatedAt:       user.CreatedAt,
 		Permissions:     user.GetPermissions(),

@@ -87,7 +87,7 @@ DB_HOST=localhost
 DB_PORT=5432
 DB_USER=automax
 DB_PASSWORD=automax123
-DB_NAME=automax
+DB_NAME=Executive-office
 DB_SSLMODE=disable
 
 # Redis
@@ -154,7 +154,7 @@ FRONTEND_URL=
 
 3. **Start infrastructure services**
    ```bash
-   docker-compose up -d postgres redis minio
+   docker compose up -d        # db, redis, minio
    ```
 
 4. **Run the application**
@@ -164,16 +164,15 @@ FRONTEND_URL=
 
 ### Using Docker
 
-1. **Build and run all services**
-   ```bash
-   docker-compose up --build
-   ```
+Full stack (db, redis, minio, backend, frontend from `../EO-Client`):
 
-2. **Or build the image separately**
-   ```bash
-   docker build -t automax-backend .
-   docker run -p 8080:8080 --env-file .env automax-backend
-   ```
+```bash
+cp env.docker.example .env.docker   # then set LICENSE_ENCRYPTION_KEY and JWT_SECRET
+docker compose --profile app up -d --build
+```
+
+Open <http://localhost:3000> (admin@automax.com / admin123 on a fresh database).
+See [docs/docker.md](docs/docker.md) for ports, everyday commands and troubleshooting.
 
 ## API Documentation
 
@@ -241,12 +240,13 @@ golangci-lint run
 
 ## Docker Compose Services
 
-| Service | Port | Description |
-|---------|------|-------------|
-| postgres | 5432 | PostgreSQL database |
-| redis | 6379 | Redis cache |
-| minio | 9000, 9090 | MinIO object storage |
-| backend | 8080 | API server |
+| Service | Port | Description | Profile |
+|---------|------|-------------|---------|
+| db | 5432 | PostgreSQL 15 | default |
+| redis | 6379 | Redis cache | default |
+| minio | 9000, 9090 | MinIO object storage + console | default |
+| backend | 8080 | API server | `app` |
+| frontend | 3000 | EO-Client web app | `app` |
 
 ## License
 

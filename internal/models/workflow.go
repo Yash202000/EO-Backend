@@ -110,11 +110,6 @@ type WorkflowState struct {
 	// Merge Configuration - whether incidents in this state can be merged
 	IsMergable bool `gorm:"default:false" json:"is_mergable"`
 
-	// IsAIQA marks this state as requiring AI Quality Assurance.
-	// When an incident with is_ai_verified=true reaches a state where is_ai_qa=true,
-	// the AI quality monitor will process it.
-	IsAIQA bool `gorm:"column:is_ai_qa;default:false" json:"is_ai_qa"`
-
 	// LockAssignee makes the incident's assignee read-only while it is in this state.
 	// Manual edits/reassignments are rejected once the incident has an assignee;
 	// workflow transitions (and their auto-assignment) are not affected.
@@ -263,6 +258,8 @@ type TransitionRequirement struct {
 	IsMandatory     *bool  `gorm:"default:true" json:"is_mandatory"`
 	IsMultiple      *bool  `gorm:"default:false" json:"is_multiple"`
 	ErrorMessage    string `gorm:"size:200" json:"error_message"`
+	// Config holds type-specific settings as JSON (linked_closed: {"type":"assignment","scope":"all"}).
+	Config string `gorm:"type:text" json:"config"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -391,7 +388,6 @@ type WorkflowStateCreateRequest struct {
 	SLAUnit            string   `json:"sla_unit" validate:"omitempty,oneof=minutes hours days months"`
 	EscalationPolicyID *string  `json:"escalation_policy_id" validate:"omitempty,uuid"`
 	IsMergable         bool     `json:"is_mergable"`
-	IsAIQA             bool     `json:"is_ai_qa"`
 	LockAssignee       bool     `json:"lock_assignee"`
 	IsReadyToClose     bool     `json:"is_ready_to_close"`
 	IsPartialClose     bool     `json:"is_partial_close"`
@@ -423,7 +419,6 @@ type WorkflowStateUpdateRequest struct {
 	SLAUnit            string   `json:"sla_unit" validate:"omitempty,oneof=minutes hours days months"`
 	EscalationPolicyID *string  `json:"escalation_policy_id" validate:"omitempty,uuid"`
 	IsMergable         *bool    `json:"is_mergable"`
-	IsAIQA             *bool    `json:"is_ai_qa"`
 	LockAssignee       *bool    `json:"lock_assignee"`
 	IsReadyToClose     *bool    `json:"is_ready_to_close"`
 	IsPartialClose     *bool    `json:"is_partial_close"`
@@ -508,16 +503,17 @@ type WorkflowTransitionUpdateRequest struct {
 }
 
 type TransitionRequirementRequest struct {
-	RequirementType string `json:"requirement_type" validate:"required,oneof=comment attachment feedback field_value"`
+	RequirementType string `json:"requirement_type" validate:"required,oneof=comment attachment feedback field_value rating linked_closed"`
 	FieldName       string `json:"field_name"`
 	FieldValue      string `json:"field_value"`
 	IsMandatory     *bool  `json:"is_mandatory"`
 	IsMultiple      *bool  `json:"is_multiple"`
 	ErrorMessage    string `json:"error_message"`
+	Config          string `json:"config"`
 }
 
 type TransitionActionRequest struct {
-	ActionType     string `json:"action_type" validate:"required,oneof=email field_update webhook notification sms"`
+	ActionType     string `json:"action_type" validate:"required,oneof=email field_update webhook notification sms create_linked"`
 	Name           string `json:"name" validate:"required,min=2,max=100"`
 	Description    string `json:"description"`
 	Config         string `json:"config"`
@@ -614,7 +610,6 @@ type WorkflowStateResponse struct {
 	EscalationPolicyID *uuid.UUID                `json:"escalation_policy_id,omitempty"`
 	EscalationPolicy   *EscalationPolicyResponse `json:"escalation_policy,omitempty"`
 	IsMergable         bool                      `json:"is_mergable"`
-	IsAIQA             bool                      `json:"is_ai_qa"`
 	LockAssignee       bool                      `json:"lock_assignee"`
 	IsReadyToClose     bool                      `json:"is_ready_to_close"`
 	IsPartialClose     bool                      `json:"is_partial_close"`
@@ -685,6 +680,7 @@ type TransitionRequirementResponse struct {
 	IsMultiple      *bool     `json:"is_multiple"`
 	IsMandatory     *bool     `json:"is_mandatory"`
 	ErrorMessage    string    `json:"error_message,omitempty"`
+	Config          string    `json:"config,omitempty"`
 }
 
 type TransitionActionResponse struct {
@@ -838,7 +834,6 @@ func ToWorkflowStateResponse(s *WorkflowState) WorkflowStateResponse {
 		SLAUnit:            s.SLAUnit,
 		EscalationPolicyID: s.EscalationPolicyID,
 		IsMergable:         s.IsMergable,
-		IsAIQA:             s.IsAIQA,
 		LockAssignee:       s.LockAssignee,
 		IsReadyToClose:     s.IsReadyToClose,
 		IsPartialClose:     s.IsPartialClose,
@@ -991,6 +986,7 @@ func ToTransitionRequirementResponse(r *TransitionRequirement) TransitionRequire
 		IsMandatory:     r.IsMandatory,
 		IsMultiple:      r.IsMultiple,
 		ErrorMessage:    r.ErrorMessage,
+		Config:          r.Config,
 	}
 }
 
@@ -1102,6 +1098,7 @@ type TransitionRequirementExport struct {
 	FieldValue      string `json:"field_value,omitempty"`
 	IsMandatory     *bool  `json:"is_mandatory"`
 	ErrorMessage    string `json:"error_message,omitempty"`
+	Config          string `json:"config,omitempty"`
 }
 
 // TransitionActionExport represents an action without IDs

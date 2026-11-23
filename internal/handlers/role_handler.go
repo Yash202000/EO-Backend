@@ -499,7 +499,7 @@ func (h *RoleHandler) Export(c *fiber.Ctx) error {
 
 	// One query for all users (with their roles), grouped by role — the
 	// same listing the user export uses.
-	allUsers, _, err := h.userRepo.List(c.UserContext(), 1, 10000, "", "", "", "", nil, nil, nil, nil, false, false)
+	allUsers, _, err := h.userRepo.List(c.UserContext(), 1, 10000, "", "", nil, nil, nil, nil, false, false)
 	if err != nil {
 		return utils.InternalErrorResponse(c, err, i18n.T(c.UserContext(), "internal_server_error"))
 	}
